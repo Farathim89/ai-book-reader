@@ -13,7 +13,7 @@ class VoicePlanner:
         self.narrator = narrator
         self.cast = cast or {}
         self.use_characters = use_characters
-        self.pauses = pauses or {"sentence": 0.18, "paragraph": 0.5, "heading": 0.8, "chapter": 1.5}
+        self.pauses = pauses or {"sentence": 0.45, "paragraph": 1.0, "heading": 1.2, "chapter": 2.0}
 
     def runs(self, u: int) -> list[tuple[str, str]]:
         ci, pi, si = self.book.units[u]
@@ -54,7 +54,29 @@ class VoicePlanner:
         return vs
 
     def pause(self, u: int) -> float:
-        return self.pauses.get(self.book.pause_after(u), 0.2)
+        """The break after unit u. Sentence and paragraph breaks vary a little, like a narrator's:
+        longer after '...' / '?' / '!' and long sentences, shorter after very short ones, plus a
+        small fixed jitter (the same every time, so exports stay reproducible)."""
+        kind = self.book.pause_after(u)
+        base = self.pauses.get(kind, 0.2)
+        if kind not in ("sentence", "paragraph"):
+            return base
+        ci, pi, si = self.book.units[u]
+        text = self.book.chapters[ci].paragraphs[pi].sentence_text(si).rstrip(" \"'”’)]")
+        f = 1.0
+        if text.endswith(("...", "…")):
+            f = 1.35
+        elif text.endswith(("?", "!")):
+            f = 1.15
+        elif text.endswith(("—", "-", ",", ";", ":")):
+            f = 0.75                        # cut off / run on
+        words = len(text.split())
+        if words <= 3:
+            f *= 0.8
+        elif words >= 30:
+            f *= 1.1
+        jitter = 0.88 + 0.24 * (((u * 2654435761) >> 8) % 1000) / 1000      # 0.88 .. 1.12
+        return round(base * f * jitter, 3)
 
 
 MALE_POOL = [f"kokoro:{v}" for v, _, g, _ in KOKORO_VOICES if g == "male"]

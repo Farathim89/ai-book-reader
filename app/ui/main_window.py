@@ -522,8 +522,13 @@ class MainWindow(QMainWindow):
     def _update_checked(self, rel, info: str) -> None:
         if rel is not None:
             self._release = rel
-            self.update_btn.setText(f"Update  v{rel.version}")
+            waiting = updater.pending()
+            ready = bool(waiting and waiting.get("version") == rel.version)
+            self.update_btn.setText(f"Restart to update  v{rel.version}" if ready else f"Update  v{rel.version}")
             self.update_btn.show()
+            if (not ready and self.settings.get("auto_update") and rel.runtime_ok and updater.can_install()
+                    and not self.jobs.busy_prefix("Downloading update")):
+                self._auto_download(rel)
         if info == "manual":
             if rel:
                 self.show_update()
@@ -532,9 +537,25 @@ class MainWindow(QMainWindow):
         elif info.startswith("error:"):
             QMessageBox.warning(self, "Updates", info[6:])
 
+    def _auto_download(self, rel) -> None:
+        """Automatic updates: fetch the update quietly; it installs when the app closes."""
+        def done(path) -> None:
+            updater.save_pending(rel, Path(path))
+            self.update_btn.setText(f"Restart to update  v{rel.version}")
+            self._status(f"Update {rel.version} is downloaded – it installs when you close the app "
+                         "(or click the update button to restart now).")
+        job = Job(f"Downloading update {rel.version}", lambda p, c: updater.download(rel, p, c))
+        self.jobs.run(job, on_done=done, on_failed=lambda e: None)
+
     def show_update(self) -> None:
         rel = self._release
         if rel is None:
+            return
+        waiting = updater.pending()
+        if waiting and waiting.get("version") == rel.version and rel.runtime_ok:
+            if QMessageBox.question(self, "Update", f"Version {rel.version} is downloaded. Restart now to install it?"
+                                    ) == QMessageBox.Yes:
+                self._apply_update(rel, waiting["zip"])
             return
         d = UpdateDialog(rel, updater.can_install(), updater.current_version(), self)
         if not d.exec():
@@ -563,6 +584,7 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Update", f"Could not install the update: {e}")
             return
+        updater.clear_pending()
         self._status(f"Version {rel.version} installed – restarting…")
         updater.restart(exe)
         self.close()
@@ -1824,4 +1846,9 @@ class MainWindow(QMainWindow):
         self.preview_player.close()
         if getattr(self, "tray", None) is not None:
             self.tray.hide()
+        if self.settings.get("auto_update"):
+            try:
+                updater.install_pending()          # the next start is the new version
+            except Exception:  # noqa: BLE001
+                pass
         super().closeEvent(e)

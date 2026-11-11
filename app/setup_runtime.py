@@ -84,15 +84,31 @@ def setup_needed() -> str | None:
     return None if done.get("requirements") == requirements_hash() else "update"
 
 
-def nvidia_gpu() -> str | None:
+MIN_COMPUTE = 7.0      # PyTorch's CUDA 12.8 build needs Volta (2017) or newer: no GTX 900 / 10xx
+
+
+def gpu_info() -> tuple[str, float] | None:
+    """(name, compute capability) of the first NVIDIA card, or None."""
     exe = shutil.which("nvidia-smi") or r"C:\Windows\System32\nvidia-smi.exe"
     try:
-        r = subprocess.run([exe, "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True,
-                           timeout=15, creationflags=NO_WINDOW)
+        r = subprocess.run([exe, "--query-gpu=name,compute_cap", "--format=csv,noheader"], capture_output=True,
+                           text=True, timeout=15, creationflags=NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return None
     lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
-    return lines[0] if r.returncode == 0 and lines else None
+    if r.returncode != 0 or not lines:
+        return None
+    name, _, cap = lines[0].rpartition(",")
+    try:
+        return (name.strip() or lines[0]), float(cap)
+    except ValueError:
+        return lines[0], 99.0          # old driver without compute_cap: let the check step decide
+
+
+def nvidia_gpu() -> str | None:
+    """Name of an NVIDIA card PyTorch (CUDA 12.8) can use, else None."""
+    info = gpu_info()
+    return info[0] if info and info[1] >= MIN_COMPUTE else None
 
 
 def free_gb(path: Path) -> float:
@@ -119,7 +135,34 @@ def build_steps(device: str, models: bool) -> list[tuple[str, list[str]]]:
     ]
     if models:
         steps.append(("Voice models (Kokoro + Chatterbox, about 4.5 GB)", ["-c", MODELS_SCRIPT]))
+    steps.append(("Test: speak with each voice, read a page with OCR" if models else "Test: everything loads",
+                  ["-c", CHECK_SCRIPT, str(app_dir()), device, "1" if models else "0"]))
     return steps
+
+
+CUDA_FAILED = "CHECK FAILED: PyTorch cannot use the graphics card"
+
+# Last step: the parts load, the graphics card works, and (with the models) the app's self-test passes.
+CHECK_SCRIPT = r"""
+import sys
+root, device, full = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+sys.path.insert(0, root)
+import torch
+ok = torch.cuda.is_available()
+print(f"[ok]   PyTorch {torch.__version__}" + (f" on {torch.cuda.get_device_name(0)}" if ok else " on the CPU"), flush=True)
+if device == "cuda" and not ok:
+    print("CHECK FAILED: PyTorch cannot use the graphics card", flush=True)
+    sys.exit(3)
+for mod in ("numpy", "pymupdf", "docx", "soundfile", "sounddevice", "kokoro", "misaki", "spacy", "en_core_web_sm",
+            "chatterbox", "rapidocr_onnxruntime"):
+    __import__(mod)
+print("[ok]   all parts load", flush=True)
+if full:
+    from app.paths import setup_model_env
+    setup_model_env()
+    from app.main import selftest
+    sys.exit(selftest())
+"""
 
 
 # Downloads exactly the files the app loads later, file by file with a byte count for the progress bar.
@@ -189,6 +232,8 @@ def run_steps(steps, on_log, on_step, on_progress, cancelled, set_proc=None) -> 
                     detail = f"{current}   {done / 1e6:,.0f} of {total / 1e6:,.0f} MB" if total > 2e6 else current
                     on_progress(done / total, detail)
                 continue
+            if line.startswith(("[ok]", "[FAIL]", "CHECK FAILED", "SELFTEST")):
+                on_progress(-1, line[:110])
             d = re.match(r"\s*(Downloading|Collecting|Installing collected packages)\b:?\s*(\S+)?", line)
             if d:
                 if d.group(1).startswith("Installing"):
@@ -240,8 +285,8 @@ INTRO = {
 def run_setup_window(mode: str) -> int:
     from PySide6.QtCore import QObject, Qt, Signal
     from PySide6.QtGui import QIcon
-    from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
-                                   QProgressBar, QPushButton, QVBoxLayout, QWidget)
+    from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QHBoxLayout, QLabel, QMessageBox,
+                                   QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QVBoxLayout, QWidget)
 
     from . import APP_NAME, __version__
     from .ui import theme
@@ -264,9 +309,13 @@ def run_setup_window(mode: str) -> int:
             icon = resource_dir() / "assets" / "icon.png"
             if icon.exists():
                 self.setWindowIcon(QIcon(str(icon)))
-            self.resize(740, 600)
-            self.gpu = nvidia_gpu()
-            self.device = "cuda" if self.gpu else "cpu"
+            self.resize(740, 640)
+            info = gpu_info()
+            self.gpu = info[0] if info and info[1] >= MIN_COMPUTE else None
+            earlier = installed().get("device")
+            self.device = earlier if earlier in ("cuda", "cpu") and (earlier == "cpu" or self.gpu) else \
+                ("cuda" if self.gpu else "cpu")
+            self.cuda_failed = False
             self.bus = Bus()
             self.cancel = threading.Event()
             self.proc: subprocess.Popen | None = None
@@ -282,13 +331,24 @@ def run_setup_window(mode: str) -> int:
             t.setWordWrap(True)
             t.setObjectName("Muted")
             lay.addWidget(t)
-            gpu = QLabel(f"\u2713  {self.gpu}: voices run on the graphics card (PyTorch with CUDA, about 2.8 GB)."
-                         if self.gpu else
-                         "No NVIDIA graphics card found, so the CPU version of PyTorch is used (about 200 MB). "
-                         "Voices work, only slower.")
-            gpu.setWordWrap(True)
-            gpu.setStyleSheet(f"color: {theme.GREEN_HOVER if self.gpu else theme.YELLOW};")
-            lay.addWidget(gpu)
+            lay.addSpacing(4)
+            lay.addWidget(QLabel("Run the voices on"))
+            if self.gpu:
+                gpu_text = f"Graphics card: {self.gpu}  (fast; PyTorch with CUDA, about 2.8 GB)"
+            elif info:
+                gpu_text = f"Graphics card: {info[0]} is too old for PyTorch's CUDA 12.8 (needs a 2017 card or newer)"
+            else:
+                gpu_text = "Graphics card: no NVIDIA card found"
+            self.use_gpu = QRadioButton(gpu_text)
+            self.use_cpu = QRadioButton("CPU only  (works on every PC; voices are 5-20\u00d7 slower; about 200 MB)")
+            self.use_gpu.setEnabled(bool(self.gpu))
+            (self.use_gpu if self.device == "cuda" else self.use_cpu).setChecked(True)
+            group = QButtonGroup(self)
+            for rb in (self.use_gpu, self.use_cpu):
+                group.addButton(rb)
+                rb.setStyleSheet("margin-left: 14px;")
+                lay.addWidget(rb)
+            self.use_gpu.toggled.connect(self._device_changed)
             self.models = QCheckBox("Also download the voice models now (about 4.5 GB), so the first Play starts at once")
             self.models.setChecked(mode != "update")
             self.models.setVisible(mode != "update")
@@ -357,6 +417,10 @@ def run_setup_window(mode: str) -> int:
                 self.step_box.addWidget(lab)
                 self.step_labels.append(lab)
 
+        def _device_changed(self) -> None:
+            self.device = "cuda" if self.use_gpu.isChecked() else "cpu"
+            self._make_steps()
+
         def _toggle_details(self) -> None:
             self.log.setVisible(not self.log.isVisible())
             self.details_btn.setText("Hide details" if self.log.isVisible() else "Show details")
@@ -367,16 +431,23 @@ def run_setup_window(mode: str) -> int:
                 self.close()
                 return
             self.go.setEnabled(False)
-            self.models.setEnabled(False)
+            for w in (self.models, self.use_gpu, self.use_cpu):
+                w.setEnabled(False)
             self.status.setStyleSheet("")
             self.cancel.clear()
+            self.cuda_failed = False
             self._make_steps()
             self.running = True
             threading.Thread(target=self._work, daemon=True).start()
 
         def _work(self) -> None:
             b = self.bus
-            ok, err = run_steps(self.steps, b.log.emit, b.step.emit, b.progress.emit, self.cancel.is_set,
+
+            def log(line: str) -> None:
+                if line.startswith(CUDA_FAILED):
+                    self.cuda_failed = True
+                b.log.emit(line)
+            ok, err = run_steps(self.steps, log, b.step.emit, b.progress.emit, self.cancel.is_set,
                                 set_proc=lambda p: setattr(self, "proc", p))
             if ok:
                 try:
@@ -412,10 +483,17 @@ def run_setup_window(mode: str) -> int:
                 self.go.setText(f"Start {APP_NAME}")
                 self.quit_btn.setText("Close")
             else:
+                self.models.setEnabled(True)
+                self.use_gpu.setEnabled(bool(self.gpu))
+                self.use_cpu.setEnabled(True)
+                if self.cuda_failed:        # the graphics card does not work with this PyTorch: offer the CPU
+                    err = ("PyTorch could not use the graphics card (driver too old?). “CPU only” is now "
+                           "selected: click Try again, or update the NVIDIA driver and try the graphics card again.")
+                    self.use_cpu.setChecked(True)
                 self.status.setText(err)
                 self.status.setStyleSheet(f"color: {theme.DANGER};")
+                self.status.setWordWrap(True)
                 self.go.setText("Try again")
-                self.models.setEnabled(True)
                 if not self.log.isVisible():
                     self._toggle_details()
 

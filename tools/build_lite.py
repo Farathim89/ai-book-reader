@@ -200,7 +200,7 @@ def smoke_test() -> None:
     code = ("import sys; sys.path.insert(0, sys.argv[1]); import PySide6.QtWidgets, requests; "
             "from app.setup_runtime import is_lite, setup_needed, build_steps; "
             "assert is_lite(), 'not lite'; print('setup needed:', setup_needed()); "
-            "assert len(build_steps('cpu', True)) == 5")
+            "assert len(build_steps('cpu', True)) == 6")
     run(STAGE / "python" / "python.exe", "-c", code, STAGE, cwd=STAGE)
 
 

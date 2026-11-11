@@ -42,14 +42,14 @@ def test_setup_needed(lite, monkeypatch):
 def test_steps_use_pins_wheels_and_the_right_torch(lite):
     (lite / "wheels").mkdir()
     steps = S.build_steps("cuda", models=True)
-    assert len(steps) == 5
+    assert len(steps) == 6 and steps[-1][1][-3:] == [str(S.app_dir()), 'cuda', '1']
     torch = steps[0][1]
     assert f"torch=={S.TORCH_VERSION}+cu128" in torch and "https://download.pytorch.org/whl/cu128" in torch
     reqs = steps[1][1]
     assert "-c" in reqs and "--find-links" in reqs and ":all:" in reqs
     assert all("--no-deps" in s[1] for s in steps[2:4])
     cpu = S.build_steps("cpu", models=False)
-    assert len(cpu) == 4 and f"torch=={S.TORCH_VERSION}+cpu" in cpu[0][1]
+    assert len(cpu) == 5 and cpu[-1][1][-1] == '0' and f"torch=={S.TORCH_VERSION}+cpu" in cpu[0][1]
 
 
 def test_run_steps_reports_progress_and_failures(lite, monkeypatch):

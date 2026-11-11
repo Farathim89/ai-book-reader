@@ -174,6 +174,47 @@ def download(rel: Release, progress=None, cancelled=None) -> Path:
     return out
 
 
+# ---- automatic updates: downloaded in the background, installed when the app closes ------------
+def _pending_file() -> Path:
+    return sub("cache", "update") / "pending.json"
+
+
+def save_pending(rel: Release, zip_path: Path) -> None:
+    _pending_file().write_text(json.dumps({"version": rel.version, "zip": str(zip_path), "sha256": rel.sha256}),
+                               encoding="utf-8")
+
+
+def clear_pending() -> None:
+    _pending_file().unlink(missing_ok=True)
+
+
+def pending() -> dict | None:
+    """The downloaded update waiting to be installed (newer than this app), or None."""
+    try:
+        p = json.loads(_pending_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if parse_version(p.get("version", "0")) <= parse_version(current_version()) or not Path(p.get("zip", "")).exists():
+        clear_pending()
+        return None
+    return p
+
+
+def install_pending() -> Path | None:
+    """Install the waiting update (its fingerprint is checked again). Returns the program to start, or None."""
+    p = pending()
+    if not p or not can_install():
+        return None
+    z = Path(p["zip"])
+    try:
+        if p.get("sha256") and hashlib.sha256(z.read_bytes()).hexdigest() != p["sha256"]:
+            z.unlink(missing_ok=True)
+            return None
+        return install(z)
+    finally:
+        clear_pending()
+
+
 def _safe_names(z: zipfile.ZipFile) -> list[str]:
     names = []
     for name in z.namelist():

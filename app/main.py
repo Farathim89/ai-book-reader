@@ -31,6 +31,17 @@ def main() -> int:
         except Exception:
             pass
 
+    # an automatic update that was downloaded but not installed when the app last closed
+    if "--selftest" not in sys.argv and "--setup" not in sys.argv:
+        from . import updater
+        try:
+            exe = updater.install_pending()
+        except Exception:  # noqa: BLE001 - never block the start over an update
+            exe = None
+        if exe is not None:
+            updater.restart(exe)
+            hard_exit(0)
+
     # small portable: the AI parts are installed by the Set up window on first start (and after
     # updates that need other versions); "--setup" opens it to repair them
     from .setup_runtime import run_setup_window, setup_needed

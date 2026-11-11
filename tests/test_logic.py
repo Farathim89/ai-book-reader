@@ -33,7 +33,20 @@ def test_planner_unknown_speaker_uses_narrator_and_pauses():
     b = _book(["\u201cHello.\u201d", "Bye."])
     p = VoicePlanner(b, "N", {}, use_characters=True)
     assert p.runs(0) == [("N", "\u201cHello.\u201d")]
-    assert p.pause(0) == p.pauses["paragraph"] and p.pause(1) == p.pauses["chapter"]
+    assert 0.6 * p.pauses["paragraph"] < p.pause(0) < 1.2 * p.pauses["paragraph"]   # short sentence: a bit less
+    assert p.pause(1) == p.pauses["chapter"]
+
+
+def test_pauses_follow_punctuation_like_a_narrator():
+    b = _book(["Is it you? She waited... Then she spoke for a long while about the old house, the garden, the "
+               "lamps in the windows and the letters that never came, until the fire burned low. It was late, so "
+               "she went to bed. Oh. Fine."])
+    p = VoicePlanner(b, "N", {})
+    base = p.pauses["sentence"]
+    question, dots, long_one, plain, tiny = (p.pause(u) for u in range(5))
+    assert dots > plain and dots > question and long_one > tiny
+    assert all(0.5 * base < x < 1.7 * base for x in (question, dots, long_one, plain, tiny))
+    assert p.pause(1) == VoicePlanner(b, "N", {}).pause(1)          # the same every time (exports resume)
 
 
 def test_auto_cast_by_gender_and_avoids_narrator():

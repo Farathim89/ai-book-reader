@@ -18,10 +18,11 @@ import numpy as np
 from ..formats.model import Book
 from ..paths import sub
 from ..tts.planner import VoicePlanner
-from ..tts.service import TTSService, silence
+from ..tts.service import AUDIO_REV, TTSService, silence
 from ..tts.voices import ffmpeg_exe
 
 SR = 24000
+CHAPTER_LEAD_IN = 1.0        # seconds of quiet at the start of each chapter (human audiobooks: 0.1-3 s)
 
 
 class Cancelled(Exception):
@@ -88,7 +89,7 @@ class ExportJob:
     def _work_dir(self) -> Path:
         sig = json.dumps({"n": self.planner.narrator, "c": self.planner.cast if self.planner.use_characters else {},
                           "uc": self.planner.use_characters, "s": self.speed, "p": self.planner.pauses,
-                          "u": self.book.unit_count()}, sort_keys=True)
+                          "u": self.book.unit_count(), "v": AUDIO_REV}, sort_keys=True)
         h = hashlib.sha1(sig.encode()).hexdigest()[:10]
         return sub("cache", "export", f"{self.book_id}-{h}")
 
@@ -117,6 +118,9 @@ class ExportJob:
             import soundfile as sf
             frames = 0
             with sf.SoundFile(str(wav), "w", SR, 1, "PCM_16") as f:
+                lead = silence(CHAPTER_LEAD_IN)         # a breath before each chapter, like a narrator
+                f.write(lead)
+                frames += lead.size
                 for u in units:
                     if self.cancel_event.is_set():
                         raise Cancelled()
