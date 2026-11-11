@@ -34,6 +34,24 @@ def safe_filename(s: str) -> str:
     return s[:150] or "Audiobook"
 
 
+def audiobook_path(root, author: str, title: str, series: str | None = None, index=None,
+                   abs_layout: bool = True) -> Path:
+    """Where an M4B goes. Audiobookshelf layout: Author/Title/Title.m4b, or for a series
+    Author/Series/<n> - Title/Title.m4b (ABS reads the volume number from the folder name)."""
+    root = Path(root)
+    a = safe_filename(author or "Unknown")
+    t = safe_filename(title or "Audiobook")
+    idx = f"{index:g}" if isinstance(index, (int, float)) else ""
+    if abs_layout:
+        if series:
+            folder = safe_filename(f"{idx} - {title}" if idx else title)
+            return root / a / safe_filename(series) / folder / f"{t}.m4b"
+        return root / a / t / f"{t}.m4b"
+    name = f"{author} - {series} {idx} - {title}" if series and idx else (
+        f"{author} - {series} - {title}" if series else f"{author} - {title}")
+    return root / (safe_filename(name) + ".m4b")
+
+
 def ffmeta(title: str, author: str, chapters: list[tuple[str, float]]) -> str:
     def esc(v: str) -> str:
         for c in ("\\", "=", ";", "#", "\n"):

@@ -8,11 +8,11 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout,
-                               QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QStackedWidget,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
+                               QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
 from ..ai.ollama import Ollama, OllamaError
@@ -28,8 +28,9 @@ from ..tts import voices as V
 from ..tts.planner import VoicePlanner, auto_cast
 from . import theme
 from .comic_view import ComicReader
-from .dialogs import CastDialog, ExportDialog, SettingsDialog, VoicesDialog
-from .jobs import Job, JobTray
+from .. import updater
+from .dialogs import CastDialog, ExportDialog, SettingsDialog, UpdateDialog, VoicesDialog
+from .jobs import Job, JobManager, JobsButton, JobsPanel
 from .pages import BookPage, HomePage, ShelfPage, book_item
 from .player_bar import PlayerBar
 from .reader_view import TextReader
@@ -45,6 +46,7 @@ NAV_OF_PAGE = {"home": "home", "library": "library", "series": "series", "series
 class _Loader(QObject):
     """Parses books on a thread and hands them back on the UI thread."""
     loaded = Signal(int, object, str)    # book id, Book or None, error
+    update_found = Signal(object, str)   # Release or None, "manual" / "error:..." / ""
 
 
 class MainWindow(QMainWindow):
@@ -63,6 +65,9 @@ class MainWindow(QMainWindow):
         self._parsed: OrderedDict[int, object] = OrderedDict()
         self._loader = _Loader()
         self._loader.loaded.connect(self._parsed_ready)
+        self._loader.update_found.connect(self._update_checked)
+        self._release = None
+        updater.cleanup_old()
         self._waiting: dict[int, list] = {}
         self.history: list[tuple[str, dict]] = []
         self.cur_page, self.cur_ctx = "", {}
@@ -106,8 +111,16 @@ class MainWindow(QMainWindow):
         sb.setSizeGripEnabled(False)
         self.status_label = muted("")
         sb.addWidget(self.status_label, 1)
-        self.jobs = JobTray()
-        sb.addPermanentWidget(self.jobs)
+        self.jobs = JobManager(self)
+        self.jobs_panel = JobsPanel(self.jobs, on_show=self._reveal_path, parent=self)
+        self.jobs_summary = QPushButton("")
+        self.jobs_summary.setObjectName("Link")
+        self.jobs_summary.setCursor(Qt.PointingHandCursor)
+        self.jobs_summary.clicked.connect(self._toggle_jobs)
+        sb.addPermanentWidget(self.jobs_summary)
+        self.jobs.changed.connect(self._jobs_changed)
+        self.jobs.finished.connect(self._notify_job)
+        self._make_tray()
 
         n = self.narrator
         n.unitStarted.connect(self._on_unit)
@@ -135,6 +148,8 @@ class MainWindow(QMainWindow):
         self._startup_started = time.time()
         self._startup_timer.timeout.connect(self._maybe_start_jobs)
         self._startup_timer.start()
+        if self.settings.get("check_updates", True) and (updater.is_frozen() or os.environ.get("ABR_UPDATE_TEST")):
+            QTimer.singleShot(8000, self._check_updates)
 
     # =========================================================================== startup
     def _warm_up(self) -> None:
@@ -174,7 +189,7 @@ class MainWindow(QMainWindow):
                     if k % 25 == 0:
                         progress(k / len(todo), f"{k}/{len(todo)}")
                 return len(todo)
-            job = Job("Reading series & descriptions", run)
+            job = Job("Updating series & descriptions", run)
             job.ended.connect(lambda: (self.refresh_page(keep_scroll=True), self._rescan_folders()))
             self.jobs.run(job)
         else:
@@ -214,6 +229,13 @@ class MainWindow(QMainWindow):
         self.search.textChanged.connect(lambda _: self._search_timer.start())
         bar.add(self.search)
         bar.stretch()
+        self.update_btn = QPushButton("Update")
+        self.update_btn.setObjectName("UpdateButton")
+        self.update_btn.setCursor(Qt.PointingHandCursor)
+        self.update_btn.clicked.connect(self.show_update)
+        self.update_btn.hide()
+        bar.add(self.update_btn)
+        bar.lay.addSpacing(6)
         add = IconButton("upload", "Add books or a folder", 19)
         add.setPopupMode(QToolButton.InstantPopup)
         m = QMenu(self)
@@ -224,6 +246,8 @@ class MainWindow(QMainWindow):
         m.addAction("Rescan library folders", lambda: self._rescan_folders(quiet=False))
         add.setMenu(m)
         bar.add(add)
+        self.jobs_button = bar.add(JobsButton())
+        self.jobs_button.clicked.connect(self._toggle_jobs)
         voices = bar.add(IconButton("mic", "Voices: preview, default narrator, voice cloning", 19))
         voices.clicked.connect(self.show_voices)
         sett = bar.add(IconButton("settings", "Settings", 19))
@@ -295,6 +319,10 @@ class MainWindow(QMainWindow):
             p.zoomChanged.connect(self._zoom)
             p.viewChanged.connect(self._view_changed)
             p.back.connect(self.go_back)
+        more = IconButton("more", "Series actions: audiobooks for the whole series, read all volumes", 15)
+        more.clicked.connect(lambda: self._series_menu(self.cur_ctx.get("name", ""),
+                                                       more.mapToGlobal(more.rect().bottomLeft())))
+        self.series_books_page.bar.add(more)
         self.home_page.set_cover_width(width)
         self.home_page.itemActivated.connect(self._item_activated)
         self.home_page.itemPlay.connect(lambda it: self.play_book(it.key))
@@ -432,6 +460,11 @@ class MainWindow(QMainWindow):
                 inside = popup.isAncestorOf(obj) or obj is popup or obj is self.search
                 if not inside:
                     popup.hide()
+            panel = getattr(self, "jobs_panel", None)
+            if panel is not None and panel.isVisible() and isinstance(obj, QWidget) and obj.window() is self:
+                inside = panel.isAncestorOf(obj) or obj is panel or obj is self.jobs_button or obj is self.jobs_summary
+                if not inside:
+                    panel.hide()
         elif t == QEvent.KeyPress and obj is getattr(self, "search", None):
             popup = self.search_popup
             if e.key() == Qt.Key_Down and popup.isVisible():
@@ -455,6 +488,124 @@ class MainWindow(QMainWindow):
 
     def _status(self, msg: str) -> None:
         self.status_label.setText(msg)
+
+    # ---- tasks ------------------------------------------------------------------------
+    def _toggle_jobs(self) -> None:
+        b = self.jobs_button
+        right = b.mapTo(self, b.rect().bottomRight())
+        self.jobs_panel.toggle_at(QPoint(max(8, right.x() - 480), right.y() + 6))
+
+    def _jobs_changed(self) -> None:
+        running, queued = self.jobs.running(), self.jobs.queued()
+        self.jobs_button.set_count(len(running) + len(queued), bool(running))
+        if running:
+            j = running[0]
+            text = f"▶  {j.title}  ·  {int(j.frac * 100)}%"
+            if len(running) > 1:
+                text += f"  ·  +{len(running) - 1} more"
+            if queued:
+                text += f"  ·  {len(queued)} queued"
+            self.jobs_summary.setText(text)
+            self.jobs_summary.setToolTip(j.msg or j.title)
+        else:
+            self.jobs_summary.setText("")
+
+    # ---- updates -------------------------------------------------------------------------
+    def _check_updates(self, manual: bool = False) -> None:
+        def run():
+            try:
+                self._loader.update_found.emit(updater.check(), "manual" if manual else "")
+            except updater.UpdateError as e:
+                self._loader.update_found.emit(None, f"error:{e}" if manual else "")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _update_checked(self, rel, info: str) -> None:
+        if rel is not None:
+            self._release = rel
+            self.update_btn.setText(f"Update  v{rel.version}")
+            self.update_btn.show()
+        if info == "manual":
+            if rel:
+                self.show_update()
+            else:
+                QMessageBox.information(self, "Updates", f"You have the latest version ({updater.current_version()}).")
+        elif info.startswith("error:"):
+            QMessageBox.warning(self, "Updates", info[6:])
+
+    def show_update(self) -> None:
+        rel = self._release
+        if rel is None:
+            return
+        d = UpdateDialog(rel, updater.is_frozen(), updater.current_version(), self)
+        if not d.exec():
+            return
+        if d.choice == "page":
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(rel.page))
+        elif d.choice == "install":
+            if self.jobs.busy_prefix("Downloading update"):
+                return
+            job = Job(f"Downloading update {rel.version}", lambda p, c: updater.download(rel, p, c))
+            self.jobs.run(job, on_done=lambda path: self._apply_update(rel, path),
+                          on_failed=lambda e: QMessageBox.warning(self, "Update", e))
+            self._toggle_jobs() if not self.jobs_panel.isVisible() else None
+
+    def _apply_update(self, rel, zip_path) -> None:
+        busy = [j.title for j in self.jobs.running() if j.heavy]
+        if busy and QMessageBox.question(
+                self, "Update", f"These tasks are still running:\n• " + "\n• ".join(busy) +
+                "\n\nRestart now anyway? (Exports continue where they stopped next time.)") != QMessageBox.Yes:
+            self._status(f"Update {rel.version} is downloaded; it installs when you click Update again.")
+            return
+        try:
+            exe = updater.install(Path(zip_path))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Update", f"Could not install the update: {e}")
+            return
+        self._status(f"Version {rel.version} installed – restarting…")
+        updater.restart(exe)
+        self.close()
+
+    # ---- Windows notifications ---------------------------------------------------------
+    def _make_tray(self) -> None:
+        from PySide6.QtWidgets import QSystemTrayIcon
+        self.tray = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray.setToolTip(APP_NAME)
+        menu = QMenu(self)
+        menu.addAction(f"Open {APP_NAME}", self._bring_to_front)
+        menu.addAction("Tasks", lambda: (self._bring_to_front(), self._toggle_jobs()))
+        menu.addSeparator()
+        menu.addAction("Quit", self.close)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(lambda reason: reason == QSystemTrayIcon.Trigger and self._bring_to_front())
+        self.tray.messageClicked.connect(lambda: (self._bring_to_front(),
+                                                  None if self.jobs_panel.isVisible() else self._toggle_jobs()))
+        self.tray.show()
+
+    def _bring_to_front(self) -> None:
+        self.showNormal() if self.isMinimized() else self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _notify_job(self, job) -> None:
+        """A Windows notification when a long task (export, page reading, characters) ends."""
+        from PySide6.QtWidgets import QSystemTrayIcon
+        if not job.heavy or self.tray is None or not self.settings.get("notify_tasks", True):
+            return
+        if job.state == "done":
+            text = job.msg if job.msg and job.msg not in ("Done",) and not job.msg.startswith("Chapter") else \
+                f"Finished in {int((job.ended_at - job.started_at) // 60)} min."
+            self.tray.showMessage(job.title, text, QSystemTrayIcon.Information, 8000)
+        elif job.state == "failed":
+            self.tray.showMessage(f"Failed: {job.title}", job.error or "", QSystemTrayIcon.Warning, 10000)
+
+    def _reveal_path(self, path: str) -> None:
+        if path and os.path.exists(path):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
 
     # =========================================================================== data
     def rows(self) -> list[dict]:
@@ -689,6 +840,8 @@ class MainWindow(QMainWindow):
     def _item_menu(self, it: ShelfItem, pos) -> None:
         if it.kind == "book":
             self._book_menu(it.key, pos)
+        elif it.kind == "series":
+            self._series_menu(it.key, pos)
 
     def _book_menu(self, book_id: int, pos) -> None:
         r = self.library.get(book_id)
@@ -1105,7 +1258,7 @@ class MainWindow(QMainWindow):
         if not book.quote_count():
             a = m.addAction("No dialogue found in this book")
             a.setEnabled(False)
-        elif self.jobs.busy("Finding characters"):
+        elif self.jobs.busy_prefix("Finding characters"):
             a = m.addAction("Finding characters… (running)")
             a.setEnabled(False)
         elif todo and done:
@@ -1163,13 +1316,12 @@ class MainWindow(QMainWindow):
             finally:
                 ollama.unload(model)
 
-        job = Job("Finding characters", run)
+        job = Job(f"Finding characters: {r['title']}"[:70], run, heavy=True)
         job.progress.connect(lambda f, m: self._apply_characters(book_id, live=True))
-        job.done.connect(lambda d: self._characters_done(book_id))
-        job.failed.connect(lambda e: QMessageBox.warning(self, "Find characters", e))
         self.library.update_settings(book_id, use_characters=True)
         self._status(f"Finding characters in “{r['title']}”…")
-        self.jobs.run(job)
+        self.jobs.run(job, on_done=lambda d: self._characters_done(book_id),
+                      on_failed=lambda e: QMessageBox.warning(self, "Find characters", e))
 
     def _apply_characters(self, book_id: int, live: bool = False, final: bool = False) -> None:
         if live and time.time() - self._last_apply < 4:
@@ -1237,7 +1389,7 @@ class MainWindow(QMainWindow):
             rtl.toggled.connect(self._toggle_rtl)
             m.addAction(rtl)
             m.addSeparator()
-        if self.jobs.busy("Reading pages"):
+        if self.jobs.busy_prefix("Reading"):
             a = m.addAction("Reading pages… (running)")
             a.setEnabled(False)
         elif need:
@@ -1261,7 +1413,7 @@ class MainWindow(QMainWindow):
             return None, False
 
     def _offer_ocr(self) -> None:
-        if not self.book or not self.book.ocr_pages_needed or self.jobs.busy("Reading pages"):
+        if not self.book or not self.book.ocr_pages_needed or self.jobs.busy_prefix("Reading"):
             return
         n = len(self.book.ocr_pages_needed)
         comic = self.book.kind == "comic"
@@ -1287,7 +1439,7 @@ class MainWindow(QMainWindow):
             self.pull_vision_model(then_ocr=True)
 
     def run_ocr(self, redo: bool = False) -> None:
-        if not self.book or self.jobs.busy("Reading pages"):
+        if not self.book or self.jobs.busy_prefix("Reading"):
             return
         book, book_id = self.book, self.book_id
         comic = book.kind == "comic"
@@ -1325,10 +1477,10 @@ class MainWindow(QMainWindow):
                     ollama.unload(model)
             return len(ocr)
 
-        job = Job("Reading pages", run)
-        job.ended.connect(lambda: self._ocr_finished(book_id))
-        job.failed.connect(lambda e: QMessageBox.warning(self, "Read pages", e))
-        self.jobs.run(job)
+        r = self.library.get(book_id) or {}
+        job = Job(f"Reading pages: {r.get('title', '')}"[:70], run, heavy=True)
+        self.jobs.run(job, on_failed=lambda e: QMessageBox.warning(self, "Read pages", e),
+                      on_ended=lambda: self._ocr_finished(book_id))
 
     def _ocr_finished(self, book_id: int) -> None:
         store.invalidate(book_id)
@@ -1376,46 +1528,186 @@ class MainWindow(QMainWindow):
         chars = (f"character voices on ({n_chars} characters)" if bs.get("use_characters") and n_chars
                  else "one narrator voice (no character voices)")
         summary = f"Narrator: {narrator.name} ({narrator.detail}) · {chars} · speed {float(self.settings['speed']):g}×"
-        d = ExportDialog(r["title"], r["author"], self.settings, summary, self)
+        d = ExportDialog([r], self.settings, summary, parent=self)
         if not d.exec():
             return
         out = str(d.out_path())
+        holder: dict = {}
 
         def run(progress, cancelled):
-            book = self.book if (book_id == self.book_id and self.book is not None) else store.open_book(book_id, r["path"])
-            book.title, book.author = r["title"] or book.title, r["author"] or book.author   # library (Calibre) names
-            if book.unit_count() == 0:
-                raise RuntimeError("This book has no readable text yet. For comics and scanned PDFs, "
-                                   "open the book and use Pages ▸ Read text first.")
-            store.apply_speakers(book, store.load_characters(book_id))
-            planner = self._make_planner(book, book_id)
-            cover = book.cover
-            if not cover:
-                from ..formats import read_meta
-                cover = read_meta(r["path"])[2]
-            if not cover and r.get("cover") and os.path.exists(r["cover"]):
-                cover = Path(r["cover"]).read_bytes()
-            exp = ExportJob(book_id, book, planner, self.tts, out, speed=float(self.settings["speed"]),
-                            bitrate=self.settings["export_bitrate"], cover=cover, progress=progress)
-            job.on_cancel = exp.cancel
-            if cancelled():
-                exp.cancel()
-            return exp.run()
+            return self._export_one(r, out, progress, cancelled, holder)
 
-        job = Job(title, run)
-        job.done.connect(lambda path: self._export_done(path))
-        job.failed.connect(lambda e: QMessageBox.warning(self, "Make audiobook", e))
-        self.jobs.run(job)
+        job = Job(title, run, on_cancel=lambda: holder.get("exp") and holder["exp"].cancel(), heavy=True)
+        self.jobs.run(job, on_done=lambda path: self._export_done(path),
+                      on_failed=lambda e: QMessageBox.warning(self, "Make audiobook", e))
+        if self.jobs.queued():
+            self._status("Queued: it starts when the job before it is done (see Tasks).")
+
+    def _export_one(self, r: dict, out: str, progress, cancelled, holder: dict):
+        """Synthesise one library book to an M4B (runs on a job thread)."""
+        book_id = r["id"]
+        book = self.book if (book_id == self.book_id and self.book is not None) else store.open_book(book_id, r["path"])
+        book.title, book.author = r["title"] or book.title, r["author"] or book.author   # library (Calibre) names
+        if book.unit_count() == 0:
+            raise RuntimeError("This book has no readable text yet. For comics and scanned PDFs, "
+                               "open the book and use Pages ▸ Read text first.")
+        store.apply_speakers(book, store.load_characters(book_id))
+        planner = self._make_planner(book, book_id)
+        cover = book.cover
+        if not cover:
+            from ..formats import read_meta
+            cover = read_meta(r["path"])[2]
+        if not cover and r.get("cover") and os.path.exists(r["cover"]):
+            cover = Path(r["cover"]).read_bytes()
+        exp = ExportJob(book_id, book, planner, self.tts, out, speed=float(self.settings["speed"]),
+                        bitrate=self.settings["export_bitrate"], cover=cover, progress=progress)
+        holder["exp"] = exp
+        if cancelled():
+            exp.cancel()
+        return exp.run()
+
+    # =========================================================================== series batches
+    def _series_books(self, name: str) -> list[dict]:
+        return dict(views.series_groups(self.rows())).get(name, [])
+
+    def _series_menu(self, name: str, pos) -> None:
+        books = self._series_books(name)
+        if not books:
+            return
+        m = QMenu(self)
+        m.addAction(f"Open “{name}”", lambda: self.navigate("series_books", name=name))
+        m.addSeparator()
+        texts = [b for b in books if b["fmt"] != "cbz"]
+        comics = [b for b in books if b["fmt"] == "cbz"]
+        if texts:
+            m.addAction(f"Make audiobooks for all {len(texts)} book{'s' if len(texts) != 1 else ''}…",
+                        lambda: self.export_series(name))
+        if comics:
+            m.addAction(f"Read all {len(comics)} volume{'s' if len(comics) != 1 else ''} (OCR)…",
+                        lambda: self.ocr_series(name))
+            m.addAction(f"Make audiobooks for the read volumes…", lambda: self.export_series(name, comics=True))
+        m.exec(pos)
+
+    def export_series(self, name: str, comics: bool = False) -> None:
+        books = [b for b in self._series_books(name) if (b["fmt"] == "cbz") == comics]
+        if comics:
+            books = [b for b in books if (b.get("total") or 0) > 0]   # only volumes whose pages were read
+        if not books:
+            QMessageBox.information(self, "Make audiobooks", "No volumes of this series have readable text yet. "
+                                    "Use “Read all volumes (OCR)” first.")
+            return
+        title = f"Audiobooks: {name}"[:60]
+        if self.jobs.busy(title):
+            QMessageBox.information(self, "Make audiobooks", "This series is already being exported.")
+            return
+        n_chars = sum(1 for b in books if b["settings"].get("use_characters")
+                      and store.load_characters(b["id"])["characters"])
+        narrator = V.find_voice(self.tts.resolve(self.settings["narrator_voice"]))
+        summary = (f"Narrator: each book's own narrator voice (default {narrator.name}) · "
+                   f"character voices in {n_chars} of {len(books)} books · speed {float(self.settings['speed']):g}×")
+        d = ExportDialog(books, self.settings, summary, series=name, parent=self)
+        if not d.exec():
+            return
+        plan = [(b, str(d.path_for(b))) for b in books]
+        skip = d.skip.isChecked()
+        holder: dict = {}
+
+        def run(progress, cancelled):
+            made, skipped = [], []
+            n = len(plan)
+            for k, (r, out) in enumerate(plan):
+                if cancelled():
+                    break
+                if skip and Path(out).exists():
+                    skipped.append(r["title"])
+                    continue
+                try:
+                    self._export_one(r, out, lambda f, m, k=k: progress((k + f) / n, f"Book {k + 1}/{n} · {m}"),
+                                     cancelled, holder)
+                    made.append(out)
+                except Exception as e:  # noqa: BLE001 - keep going with the next book
+                    if e.__class__.__name__ == "Cancelled":
+                        break
+                    skipped.append(f"{r['title']} ({e})")
+            return made, skipped
+
+        job = Job(title, run, on_cancel=lambda: holder.get("exp") and holder["exp"].cancel(), heavy=True)
+        self.jobs.run(job, on_done=lambda res: self._series_export_done(name, *res),
+                      on_failed=lambda e: QMessageBox.warning(self, "Make audiobooks", e))
+        if self.jobs.queued():
+            self._status("Queued: it starts when the job before it is done (see Tasks).")
+
+    def _series_export_done(self, name: str, made: list, skipped: list) -> None:
+        msg = f"“{name}”: {len(made)} audiobook{'s' if len(made) != 1 else ''} made"
+        if skipped:
+            msg += f", {len(skipped)} skipped (already there or no text)"
+        self._status(msg + ".  (Tasks ▸ Show file)")
+        for j in self.jobs.history:          # the details go into the task's line in the panel
+            if j.title == f"Audiobooks: {name}"[:60] and j.state in ("running", "done"):
+                j.msg = msg
+
+    def ocr_series(self, name: str) -> None:
+        vols = [b for b in self._series_books(name) if b["fmt"] == "cbz"]
+        if not vols:
+            return
+        if self.jobs.busy_prefix("Reading"):
+            QMessageBox.information(self, "Read volumes", "Pages are already being read. Try again when that is done.")
+            return
+        ollama, vision = self._vision_ready()
+        if not vision and QMessageBox.question(
+                self, "Read volumes", "The vision model is not installed, so the basic OCR would be used "
+                "(it can miss words and get the bubble order wrong).\n\nContinue anyway?") != QMessageBox.Yes:
+            return
+        model = self.settings["vision_model"]
+        rtl = {v["id"]: self._book_rtl(v["id"]) for v in vols}
+
+        def run(progress, cancelled):
+            from ..ai.ocr import PageReader
+            from ..formats.cbz import read_page
+            reader = PageReader(ollama if vision else None, model if vision else None)
+            n = len(vols)
+            done_ids = []
+            try:
+                for k, r in enumerate(vols):
+                    if cancelled():
+                        break
+                    book = store.open_book(r["id"], r["path"])
+                    ocr = store.load_ocr(r["id"])
+                    todo = [i for i in range(len(book.pages)) if i not in ocr]
+                    for j, p in enumerate(todo):
+                        if cancelled():
+                            break
+                        try:
+                            ocr[p] = reader.comic_page(read_page(r["path"], book.pages[p]), rtl[r["id"]])
+                        except Exception:  # noqa: BLE001 - one bad page must not stop the series
+                            continue
+                        store.save_ocr(r["id"], ocr)
+                        progress((k + (j + 1) / max(1, len(todo))) / n,
+                                 f"Volume {k + 1}/{n} · page {j + 1}/{len(todo)}")
+                    store.invalidate(r["id"])
+                    book = store.open_book(r["id"], r["path"])
+                    self.library.update(r["id"], total=book.unit_count())
+                    done_ids.append(r["id"])
+                    progress((k + 1) / n, f"Volume {k + 1}/{n} done")
+            finally:
+                if vision and ollama:
+                    ollama.unload(model)
+            return done_ids
+
+        job = Job(f"Reading series: {name}"[:60], run, heavy=True)
+        self.jobs.run(job, on_done=lambda ids: self._series_ocr_done(name, ids),
+                      on_failed=lambda e: QMessageBox.warning(self, "Read volumes", e))
+
+    def _series_ocr_done(self, name: str, ids: list) -> None:
+        for bid in ids:
+            self._parsed.pop(bid, None)
+            if bid == self.book_id:
+                self._ocr_finished(bid)
+        self._status(f"“{name}”: {len(ids)} volume{'s' if len(ids) != 1 else ''} read and ready to narrate.")
+        self.refresh_page(keep_scroll=True)
 
     def _export_done(self, path) -> None:
-        box = QMessageBox(self)
-        box.setWindowTitle("Audiobook ready")
-        box.setText(f"Saved:\n{path}")
-        show = box.addButton("Show in folder", QMessageBox.ActionRole)
-        box.addButton(QMessageBox.Ok)
-        box.exec()
-        if box.clickedButton() is show:
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(str(path))])
+        self._status(f"Audiobook ready: {Path(str(path)).name}  (Tasks ▸ Show file)")
 
     # =========================================================================== dialogs
     def show_voices(self) -> None:
@@ -1434,7 +1726,10 @@ class MainWindow(QMainWindow):
         for r in self.rows():
             counts[r["library"]] = counts.get(r["library"], 0) + 1
         d = SettingsDialog(self.settings, models, counts, start_tab, self)
-        if d.exec():
+        accepted = d.exec()
+        if d.found_release is not None:
+            self._update_checked(d.found_release, "")
+        if accepted:
             self._apply_appearance()
             self._apply_library_changes(d.old_libraries, self.settings["libraries"])
             if self.book:
@@ -1459,6 +1754,7 @@ class MainWindow(QMainWindow):
         self.text_reader.restyle()
         self.comic_reader.restyle()
         self.book_page.restyle()
+        self.jobs_panel.restyle()
         self.refresh_page(keep_scroll=True)
 
     def _nav_icons(self) -> None:
@@ -1521,4 +1817,6 @@ class MainWindow(QMainWindow):
         self.jobs.cancel_all()
         self.narrator.shutdown()
         self.preview_player.close()
+        if getattr(self, "tray", None) is not None:
+            self.tray.hide()
         super().closeEvent(e)

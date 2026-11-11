@@ -133,6 +133,9 @@ QPushButton#Accent, QPushButton#Play {{ background: {GREEN}; border: 1px solid {
 QPushButton#Accent:hover, QPushButton#Play:hover {{ background: {GREEN_HOVER}; border-color: {GREEN_HOVER}; }}
 QPushButton#Play {{ font-size: 11.5pt; padding: 8px 26px; }}
 QPushButton#Danger {{ color: {DANGER}; }}
+QPushButton#UpdateButton {{ background: {YELLOW}; color: #1a1a1a; border: none; border-radius: 15px;
+    padding: 6px 16px; font-weight: 600; }}
+QPushButton#UpdateButton:hover {{ background: {ACCENT_HOVER}; }}
 QPushButton#Link {{ background: transparent; border: none; padding: 0; color: {TEXT}; text-align: left; }}
 QPushButton#Link:hover {{ color: {YELLOW}; text-decoration: underline; }}
 

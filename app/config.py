@@ -25,6 +25,8 @@ DEFAULTS: dict[str, Any] = {
     "text_model": "qwen2.5:14b",
     "vision_model": "qwen2.5vl:7b",
     "library_sort": "recent",
+    "notify_tasks": True,
+    "check_updates": True,
     "window_geometry": None,
     "window_state": None,
 }

@@ -13,6 +13,11 @@ from ..tts import voices as V
 from . import theme
 from .widgets import IconButton, muted
 
+def QApplication_process() -> None:
+    from PySide6.QtWidgets import QApplication
+    QApplication.processEvents()
+
+
 PREVIEW_TEXT = ("The old lighthouse stood at the edge of the cliff. “We should go back,” she whispered, "
                 "but he was already climbing the stairs.")
 
@@ -313,22 +318,26 @@ class CastDialog(QDialog):
 class ExportDialog(QDialog):
     """Where to save the M4B (optionally Audiobookshelf's Author/Title/ layout) and what voices it uses."""
 
-    def __init__(self, title: str, author: str, settings, summary: str, parent=None):
+    def __init__(self, books: list[dict], settings, summary: str, series: str | None = None, parent=None):
         super().__init__(parent)
         from pathlib import Path
-        from ..audio.export import safe_filename
-        self._Path, self._safe = Path, safe_filename
-        self.setWindowTitle("Make audiobook")
-        self.setMinimumWidth(560)
+        self._Path = Path
+        self.books = books
+        self.series = series
+        self.setWindowTitle("Make audiobooks" if series else "Make audiobook")
+        self.setMinimumWidth(600)
         self.s = settings
-        self.title, self.author = title or "Audiobook", author or "Unknown"
         lay = QVBoxLayout(self)
-        head = QLabel(f"Make an M4B audiobook of “{self.title}”")
+        if series:
+            head = QLabel(f"Make audiobooks for all {len(books)} books of “{series}”")
+        else:
+            head = QLabel(f"Make an M4B audiobook of “{books[0]['title']}”")
         head.setStyleSheet("font-size: 13pt; font-weight: 600;")
         head.setWordWrap(True)
         lay.addWidget(head)
         info = muted(summary + "\nChapters, cover and author/title tags are added. It runs in the background; "
-                     "a stopped export continues where it left off.")
+                     "a stopped export continues where it left off." +
+                     ("\nThe books are made one after another, in series order." if series else ""))
         info.setWordWrap(True)
         lay.addWidget(info)
         row = QHBoxLayout()
@@ -339,15 +348,19 @@ class ExportDialog(QDialog):
         row.addWidget(b)
         form = QFormLayout()
         form.addRow("Save to", row)
-        self.abs = QCheckBox("Put it in Author \\ Title \\ folders (Audiobookshelf layout)")
+        self.abs = QCheckBox("Audiobookshelf folders (Author \\ Title, or Author \\ Series \\ 1 - Title)")
         self.abs.setChecked(bool(settings.get("export_abs_layout", True)))
         form.addRow("", self.abs)
+        self.skip = QCheckBox("Skip books that already have an audiobook there")
+        self.skip.setChecked(True)
+        self.skip.setVisible(bool(series))
+        form.addRow("", self.skip)
         lay.addLayout(form)
         self.preview = muted("")
         self.preview.setWordWrap(True)
         lay.addWidget(self.preview)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText("Make audiobook")
+        bb.button(QDialogButtonBox.Ok).setText(f"Make {len(books)} audiobooks" if series else "Make audiobook")
         bb.button(QDialogButtonBox.Ok).setObjectName("Accent")
         bb.accepted.connect(self._accept)
         bb.rejected.connect(self.reject)
@@ -356,15 +369,20 @@ class ExportDialog(QDialog):
         self.abs.toggled.connect(self._update)
         self._update()
 
-    def out_path(self):
+    def path_for(self, r: dict):
+        from ..audio.export import audiobook_path
         root = self._Path(self.folder.text().strip() or self._Path.home())
-        name = self._safe(self.title) + ".m4b"
-        if self.abs.isChecked():
-            return root / self._safe(self.author) / self._safe(self.title) / name
-        return root / (self._safe(f"{self.author} - {self.title}") + ".m4b")
+        return audiobook_path(root, r.get("author") or "", r.get("title") or "", r.get("series"),
+                              r.get("series_index"), self.abs.isChecked())
+
+    def out_path(self):
+        return self.path_for(self.books[0])
 
     def _update(self) -> None:
-        self.preview.setText(f"File: {self.out_path()}")
+        if self.series and len(self.books) > 1:
+            self.preview.setText(f"First: {self.path_for(self.books[0])}\nLast:  {self.path_for(self.books[-1])}")
+        else:
+            self.preview.setText(f"File: {self.out_path()}")
 
     def _browse(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Save audiobooks to", self.folder.text())
@@ -373,12 +391,64 @@ class ExportDialog(QDialog):
 
     def _accept(self) -> None:
         out = self.out_path()
-        if out.exists() and QMessageBox.question(self, "Make audiobook",
-                                                 f"{out.name} already exists. Replace it?") != QMessageBox.Yes:
+        if not self.series and out.exists() and QMessageBox.question(
+                self, "Make audiobook", f"{out.name} already exists. Replace it?") != QMessageBox.Yes:
             return
         self.s["export_dir"] = self.folder.text().strip()
         self.s["export_abs_layout"] = self.abs.isChecked()
         self.s.save()
+        self.accept()
+
+
+# ---------------------------------------------------------------------------------- updates
+class UpdateDialog(QDialog):
+    """'Update available' window: release notes, Install now / Release notes / Later."""
+
+    def __init__(self, rel, frozen: bool, current: str, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QTextBrowser
+        self.setWindowTitle("Update available")
+        self.resize(620, 520)
+        self.choice = ""
+        lay = QVBoxLayout(self)
+        head = QLabel(f"Ai Book Reader {rel.version} is out")
+        head.setStyleSheet("font-size: 15pt; font-weight: 600;")
+        lay.addWidget(head)
+        size = f"{rel.size / 1e6:.0f} MB" if rel.size else ""
+        if not rel.runtime_ok:
+            sub_text = (f"You have {current}. This version also needs a newer AI runtime, so it cannot be installed "
+                        "with one click: open the release page to download the full portable app.")
+        elif not frozen:
+            sub_text = f"You have {current} and are running from source: update with git, then build again."
+        else:
+            sub_text = (f"You have {current}. Install now downloads {size}, checks its SHA-256 fingerprint, "
+                        "installs it and restarts. Your library, settings and voices stay as they are.")
+        info = muted(sub_text)
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        notes = QTextBrowser()
+        notes.setOpenExternalLinks(True)
+        notes.setMarkdown(rel.notes or "_No release notes._")
+        notes.setStyleSheet(f"QTextBrowser {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER}; "
+                            "border-radius: 6px; padding: 8px; }")
+        lay.addWidget(notes, 1)
+        row = QHBoxLayout()
+        page = QPushButton("Release notes")
+        page.clicked.connect(lambda: self._done("page"))
+        later = QPushButton("Later")
+        later.clicked.connect(self.reject)
+        row.addWidget(page)
+        row.addStretch(1)
+        row.addWidget(later)
+        if rel.runtime_ok and frozen:
+            install = QPushButton("Install now")
+            install.setObjectName("Accent")
+            install.clicked.connect(lambda: self._done("install"))
+            row.addWidget(install)
+        lay.addLayout(row)
+
+    def _done(self, choice: str) -> None:
+        self.choice = choice
         self.accept()
 
 
@@ -634,6 +704,29 @@ class SettingsDialog(QDialog):
             f.addRow("", QLabel(f"<span style='color:{theme.DANGER}'>Ollama is not running.</span>"))
         tabs.addTab(w, "AI models")
 
+        # app: version, updates, notifications
+        from .. import __version__
+        from .. import updater
+        w = QWidget()
+        f = QFormLayout(w)
+        f.addRow("Version", QLabel(f"{__version__}" + ("" if updater.is_frozen() else "  (running from source)")))
+        self.check_updates = QCheckBox("Check for updates automatically (asks GitHub for the latest release)")
+        self.check_updates.setChecked(bool(settings.get("check_updates", True)))
+        f.addRow("", self.check_updates)
+        row = QHBoxLayout()
+        now = QPushButton("Check now")
+        self.update_status = muted("")
+        now.clicked.connect(self._check_now)
+        row.addWidget(now)
+        row.addWidget(self.update_status, 1)
+        f.addRow("", row)
+        self.notify = QCheckBox("Windows notification when an export, page reading or character search ends")
+        self.notify.setChecked(bool(settings.get("notify_tasks", True)))
+        f.addRow("", self.notify)
+        f.addRow("", muted(f"Updates come from github.com/{updater.REPO}. No personal data is sent."))
+        tabs.addTab(w, "App")
+        self.found_release = None
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setObjectName("Accent")
         bb.accepted.connect(self._save)
@@ -642,6 +735,19 @@ class SettingsDialog(QDialog):
         for i in range(tabs.count()):
             if tabs.tabText(i) == start_tab:
                 tabs.setCurrentIndex(i)
+
+    def _check_now(self) -> None:
+        from .. import updater
+        self.update_status.setText("Checking…")
+        QApplication_process()
+        try:
+            rel = updater.check()
+        except updater.UpdateError as e:
+            self.update_status.setText(str(e))
+            return
+        self.found_release = rel
+        self.update_status.setText(f"Version {rel.version} is available – use the Update button at the top."
+                                   if rel else f"You have the latest version ({updater.current_version()}).")
 
     def _spin(self, v: float) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
@@ -669,6 +775,8 @@ class SettingsDialog(QDialog):
         s["ollama_url"] = self.ollama_url.text().strip() or "http://127.0.0.1:11434"
         s["text_model"] = self.text_model.currentText().strip()
         s["vision_model"] = self.vision_model.currentText().strip()
+        s["check_updates"] = self.check_updates.isChecked()
+        s["notify_tasks"] = self.notify.isChecked()
         s["theme"] = self.theme_box.currentText()
         s["shelf_style"] = self.shelf_box.currentText()
         s["show_titles"] = self.titles.isChecked()

@@ -128,6 +128,15 @@ def test_lines_to_paragraphs():
     assert lines_to_paragraphs(lines) == ["The first paragraph goes on.", "Second paragraph."]
 
 
+def test_audiobook_path_layouts(tmp_path):
+    from app.audio.export import audiobook_path
+    p = audiobook_path(tmp_path, "Asato Asato", "Run Through the Battlefront", "86--EIGHTY-SIX", 2.0)
+    assert p == tmp_path / "Asato Asato" / "86--EIGHTY-SIX" / "2 - Run Through the Battlefront" / "Run Through the Battlefront.m4b"
+    assert audiobook_path(tmp_path, "Eiko Kadono", "Kiki", None, None) == tmp_path / "Eiko Kadono" / "Kiki" / "Kiki.m4b"
+    assert audiobook_path(tmp_path, "A", "T", "S", 4.5, abs_layout=False) == tmp_path / "A - S 4.5 - T.m4b"
+    assert audiobook_path(tmp_path, "A", "T", None, None, abs_layout=False) == tmp_path / "A - T.m4b"
+
+
 def test_ffmeta_chapters():
     m = ffmeta("A=B", "Me", [("One", 10.0), ("Two; #2", 5.5)])
     assert "title=A\\=B" in m and "START=10000" in m and "END=15500" in m and "title=Two\\; \\#2" in m

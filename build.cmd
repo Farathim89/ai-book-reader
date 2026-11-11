@@ -12,6 +12,7 @@ if exist "dist\Ai Book Reader\data" (
 set BUILD_RC=%ERRORLEVEL%
 if exist "dist\_data_keep" move "dist\_data_keep" "dist\Ai Book Reader\data" >nul
 if not "%BUILD_RC%"=="0" goto :error
+.venv\Scripts\python.exe tools\runtime_id.py "dist\Ai Book Reader" || goto :error
 echo.
 echo Built: "%~dp0dist\Ai Book Reader\Ai Book Reader.exe"
 exit /b 0
