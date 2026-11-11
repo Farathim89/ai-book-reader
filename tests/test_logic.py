@@ -224,6 +224,15 @@ def test_views_sort_filter_groups():
     assert views.fmt_index(4.0) == "4" and views.fmt_index(4.5) == "4.5"
 
 
+def test_search_ranking():
+    from app.ui.search import match_names, rank_books
+    rows = _rows()
+    assert [r["id"] for r in rank_books(rows, "86")][:3] == [3, 2, 4]   # titles starting with "86", in volume order
+    assert [r["id"] for r in rank_books(rows, "vol 10")] == [1]
+    assert match_names([("Earthsea", 6), ("86", 13), ("Sea of Stars", 2)], "sea") == [("Sea of Stars", 2), ("Earthsea", 6)]
+    assert match_names([("Asato Asato", 4)], "asato a") == [("Asato Asato", 4)]
+
+
 def test_scan_folder_prefers_one_format_per_book(tmp_path):
     from app.library.db import scan_folder
     d = tmp_path / "Author" / "Book (1)"

@@ -96,6 +96,11 @@ class MainWindow(QMainWindow):
         v.addWidget(self.player_bar)
         self.setCentralWidget(central)
         self._build_pages()
+        from .search import SearchPopup
+        self.search_popup = SearchPopup(self)
+        self.search_popup.picked.connect(self._search_picked)
+        self.search.installEventFilter(self)
+        self.search.returnPressed.connect(self._search_enter)
 
         sb = self.statusBar()
         sb.setSizeGripEnabled(False)
@@ -404,14 +409,49 @@ class MainWindow(QMainWindow):
         sc("PgDown", lambda: self._page_step(1), reader)
         sc("PgUp", lambda: self._page_step(-1), reader)
         sc("Alt+Left", self.go_back)
-        sc("Escape", self.go_back, lambda: self.cur_page in ("reader", "book", "series_books", "author_books"))
+        sc("Escape", self._escape)
         sc("Ctrl+F", lambda: (self.search.setFocus(), self.search.selectAll()))
 
-    def eventFilter(self, obj, e) -> bool:
-        if e.type() == QEvent.MouseButtonPress and e.button() == Qt.BackButton:
+    def _escape(self) -> None:
+        if self.search_popup.isVisible():
+            self.search_popup.hide()
+        elif self.search.hasFocus():
+            self.search.clear()
+            self.search.clearFocus()
+        elif self.cur_page in ("reader", "book", "series_books", "author_books"):
             self.go_back()
-            return True
+
+    def eventFilter(self, obj, e) -> bool:
+        t = e.type()
+        if t == QEvent.MouseButtonPress:
+            if e.button() == Qt.BackButton:
+                self.go_back()
+                return True
+            popup = getattr(self, "search_popup", None)
+            if popup is not None and popup.isVisible() and isinstance(obj, QWidget) and obj.window() is self:
+                inside = popup.isAncestorOf(obj) or obj is popup or obj is self.search
+                if not inside:
+                    popup.hide()
+        elif t == QEvent.KeyPress and obj is getattr(self, "search", None):
+            popup = self.search_popup
+            if e.key() == Qt.Key_Down and popup.isVisible():
+                popup.move_selection(1)
+                return True
+            if e.key() == Qt.Key_Up and popup.isVisible():
+                popup.move_selection(-1)
+                return True
+            if e.key() == Qt.Key_Escape:
+                if popup.isVisible():
+                    popup.hide()
+                else:
+                    self.search.clear()
+                return True
         return False
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        if getattr(self, "search_popup", None) is not None and self.search_popup.isVisible():
+            self._place_search_popup()
 
     def _status(self, msg: str) -> None:
         self.status_label.setText(msg)
@@ -526,10 +566,48 @@ class MainWindow(QMainWindow):
             self.navigate("home", push=False)
 
     def _search_now(self) -> None:
-        if self.search.text().strip() and self.cur_page != "library":
-            self.navigate("library")
-        else:
+        from .search import match_names, rank_books
+        text = self.search.text().strip()
+        if self.cur_page == "library":
             self.refresh_page(keep_scroll=False)
+        if not text:
+            self.search_popup.hide()
+            return
+        if not self.search.hasFocus():
+            return
+        rows = self.rows_in_library()
+        books = rank_books(rows, text)
+        series = match_names([(n, len(b)) for n, b in views.series_groups(rows)], text)
+        authors = match_names([(n, len(b)) for n, b in views.author_groups(rows)], text)
+        self._place_search_popup()
+        self.search_popup.show_results(books, series, authors, text)
+
+    def _place_search_popup(self) -> None:
+        pos = self.search.mapTo(self, self.search.rect().bottomLeft())
+        self.search_popup.move(pos.x(), pos.y() + 4)
+        self.search_popup.setFixedWidth(max(self.search.width(), 480))
+
+    def _search_enter(self) -> None:
+        if self.search_popup.isVisible() and self.search_popup.activate_current():
+            return
+        self.search_popup.hide()
+        if self.search.text().strip():
+            self.navigate("library")
+
+    def _search_picked(self, kind: str, key) -> None:
+        if kind == "all":
+            self.navigate("library")
+            return
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.search.clearFocus()
+        if kind == "book":
+            self.navigate("book", id=key)
+        elif kind == "series":
+            self.navigate("series_books", name=key)
+        elif kind == "author":
+            self.navigate("author_books", name=key)
 
     def refresh_page(self, keep_scroll: bool = False) -> None:
         page, ctx = self.cur_page, self.cur_ctx
