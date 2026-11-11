@@ -1,5 +1,5 @@
 """TV mode (F10), like ABS-DA's: a full-screen couch layout with a side menu, big covers and a
-Now Playing screen. Works with an Xbox controller (XInput), a TV remote's arrow keys or the keyboard;
+Now Playing screen. Works with an Xbox or PlayStation controller, a TV remote's arrow keys or the keyboard;
 a dim, moving screen saver comes on while a book plays and nobody presses anything.
 
 Keys: arrows move, Enter/Space = OK, Esc/Backspace = back, F10 = leave TV mode, media keys play.
@@ -1080,8 +1080,9 @@ class SettingsPage(TvPage):
                           TvButton("Leave TV mode", tv.leave, theme.I["exit"], width=620, height=62, align=Qt.AlignLeft),
                           TvButton("Close Ai Book Reader", self._quit, theme.I["close"], width=620, height=62,
                                    align=Qt.AlignLeft)], vertical=True)
-        self.note("Controller: " + ("an Xbox controller (or one that works like it) is used when connected."
-                                     if tv.pad.available else "XInput is not available on this PC."), 17)
+        now = f"{tv.pad.connected} connected. " if tv.pad.connected else "No controller connected right now. "
+        self.note("Controller: " + now + "Xbox controllers and PlayStation DualShock 4 / DualSense (USB or "
+                  "Bluetooth) work: cross / A = OK, circle / B = back, square / X = play or pause.", 17)
         self.finish()
         self._labels()
         s.save()

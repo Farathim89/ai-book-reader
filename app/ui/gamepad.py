@@ -1,5 +1,5 @@
-"""Game controllers for TV mode, read with Windows' XInput (Xbox controllers, and PlayStation
-controllers through Steam Input / DS4Windows). No extra packages: plain ctypes."""
+"""Game controllers for TV mode: Xbox controllers through Windows' XInput, PlayStation
+DualShock 4 / DualSense through HID (ps_controller.py). No extra packages: plain ctypes."""
 from __future__ import annotations
 
 import ctypes
@@ -76,18 +76,57 @@ class Gamepad(QObject):
         self._held: set[str] = set()
         self._repeat: dict[str, float] = {}
         self._vol_at = 0.0
+        self.ps = None                      # an open PlayStation controller (ps_controller.PsController)
+        self._ps_scan = 0.0
+        self.connected = ""                 # name of the controller in use, "" when none
 
     @property
     def available(self) -> bool:
-        return self.dll is not None
+        return sys.platform == "win32"
 
     def start(self) -> None:
-        if self.dll is not None:
+        if self.available:
             self.timer.start()
 
     def stop(self) -> None:
         self.timer.stop()
         self._held.clear()
+        if self.ps is not None:
+            self.ps.close()
+            self.ps = None
+
+    def _playstation(self):
+        """The open PlayStation controller; looks for one every 3 s while there is none."""
+        if self.ps is not None and self.ps.alive:
+            return self.ps
+        if self.ps is not None:
+            self.ps.close()
+            self.ps = None
+        now = time.monotonic()
+        if now < self._ps_scan:
+            return None
+        self._ps_scan = now + 3.0
+        from .ps_controller import open_first
+        try:
+            self.ps = open_first()
+        except Exception:  # noqa: BLE001 - a controller problem must never break TV mode
+            self.ps = None
+        return self.ps
+
+    def _read(self) -> tuple[set[str], int] | None:
+        """(pressed names, right-stick volume direction) from an Xbox or PlayStation controller."""
+        if self.dll is not None:
+            st = self._state()
+            if st is not None:
+                pad = st.Gamepad
+                self.connected = "Xbox controller"
+                return pressed_names(pad), (1 if pad.sThumbRY > STICK else -1 if pad.sThumbRY < -STICK else 0)
+        ps = self._playstation()
+        if ps is not None:
+            self.connected = ps.name
+            return ps.state() or (set(), 0)
+        self.connected = ""
+        return None
 
     def _state(self) -> XINPUT_STATE | None:
         st = XINPUT_STATE()
@@ -105,12 +144,11 @@ class Gamepad(QObject):
         return None
 
     def poll(self) -> None:
-        st = self._state()
-        if st is None:
+        got = self._read()
+        if got is None:
             self._held.clear()
             return
-        pad = st.Gamepad
-        names = pressed_names(pad)
+        names, vol = got
         now = time.monotonic()
         for n in names - self._held:
             self.pressed.emit(n)
@@ -120,6 +158,6 @@ class Gamepad(QObject):
                 self.pressed.emit(n)
                 self._repeat[n] = now + 0.11
         self._held = names
-        if abs(pad.sThumbRY) > STICK and now >= self._vol_at:
-            self.volume.emit(0.05 if pad.sThumbRY > 0 else -0.05)
+        if vol and now >= self._vol_at:
+            self.volume.emit(0.05 * vol)
             self._vol_at = now + 0.15
