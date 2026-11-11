@@ -1,21 +1,13 @@
 @echo off
-rem Copies the built app (dist\Ai Book Reader) into the portable folder, keeping its data\ folder
-rem (library, settings, voices, AI models). Default target: ..\AiBookReader-Portable
+rem Builds the small portable app and puts it into the portable folder, keeping its data\ folder
+rem (library, settings, voices, models) and the AI parts installed in its python\ folder.
+rem Default target: ..\AiBookReader-Portable   (a new folder gets the Set up window on first start)
 cd /d "%~dp0"
 set "TARGET=%~1"
 if "%TARGET%"=="" set "TARGET=%~dp0..\AiBookReader-Portable"
-if not exist "dist\Ai Book Reader\Ai Book Reader.exe" (
-    echo Build first: build.cmd
-    exit /b 1
-)
-tasklist /FI "IMAGENAME eq Ai Book Reader.exe" | find /I "Ai Book Reader.exe" >nul && (
-    echo Close Ai Book Reader first.
-    exit /b 1
-)
-robocopy "dist\Ai Book Reader" "%TARGET%" /MIR /XD "dist\Ai Book Reader\data" "%TARGET%\data" /NFL /NDL /NJH /NP /R:1 /W:1
-if %ERRORLEVEL% GEQ 8 (
-    echo Copy failed.
-    exit /b 1
-)
+.venv\Scripts\python.exe tools\build_lite.py --no-zip --install "%TARGET%" || goto :error
 echo Portable app: "%TARGET%\Ai Book Reader.exe"
 exit /b 0
+:error
+echo Failed.
+exit /b 1

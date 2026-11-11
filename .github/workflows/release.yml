@@ -1,0 +1,64 @@
+# Builds the small portable app and publishes a GitHub release when a version tag is pushed
+# (tools/publish.py makes the tag). "Run workflow" by hand only builds and keeps the files as an artifact.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0          # release notes come from the commits since the previous tag
+
+      - name: Fetch the tag messages (release notes)
+        run: git fetch --force --tags origin
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-ci.txt
+            runtime/constraints.txt
+
+      - name: Install test tools
+        run: python -m pip install --disable-pip-version-check -r requirements-ci.txt
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Build the portable app
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            python tools/build_lite.py --tag "${{ github.ref_name }}"
+          } else {
+            python tools/build_lite.py
+          }
+
+      - name: Keep the files
+        uses: actions/upload-artifact@v4
+        with:
+          name: AiBookReader-${{ github.ref_name }}
+          path: releases/
+          retention-days: 14
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = python -c "import app; print(app.__version__)"
+          $d = "releases/$v"
+          gh release create "v$v" "$d/AiBookReader-Portable-$v.zip" "$d/AiBookReader-src-$v.zip" "$d/update.json" `
+            --title "Ai Book Reader $v" --notes-file "$d/notes.md" --verify-tag

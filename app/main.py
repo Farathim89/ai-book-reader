@@ -24,15 +24,24 @@ def main() -> int:
     import warnings
     warnings.filterwarnings("ignore")
 
-    if "--selftest" in sys.argv:
-        hard_exit(selftest())
-
     if sys.platform == "win32":
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Farathim.AiBookReader")
         except Exception:
             pass
+
+    # small portable: the AI parts are installed by the Set up window on first start (and after
+    # updates that need other versions); "--setup" opens it to repair them
+    from .setup_runtime import run_setup_window, setup_needed
+    need = setup_needed()
+    if "--selftest" in sys.argv:
+        if need:
+            print("SELFTEST FAILED: the AI parts are not installed yet (start the app once to set them up)")
+            hard_exit(1)
+        hard_exit(selftest())
+    if need or "--setup" in sys.argv:
+        hard_exit(run_setup_window(need or "repair"))
 
     from PySide6.QtWidgets import QApplication, QMessageBox
 

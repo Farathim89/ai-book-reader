@@ -1,0 +1,17 @@
+# Light install for the tests on GitHub Actions: the tests need no PyTorch or voice engines.
+-c runtime/constraints.txt
+numpy
+PySide6-Essentials
+requests
+PyMuPDF
+python-docx
+striprtf
+lxml
+beautifulsoup4
+charset-normalizer
+mobi
+Pillow
+wordninja
+rapidocr-onnxruntime
+packaging
+pytest

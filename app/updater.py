@@ -1,11 +1,16 @@
 """One-click updates from GitHub releases (like ABS-DA).
 
-A release carries two small assets:
-  update.json                 {"version", "runtime", "asset", "sha256", "size"}
-  AiBookReader-app-<v>.zip    the new "Ai Book Reader.exe" (it contains all the app's Python code)
-                              plus _internal/assets and _internal/runtime.json
-The ~5 GB AI runtime (PyTorch, CUDA...) only changes rarely; when the release needs a different
-runtime than the installed one, the app says so instead of half-updating.
+A release carries:
+  AiBookReader-Portable-<v>.zip  the whole small portable app (first download)
+  AiBookReader-src-<v>.zip       only the app: app/, assets/, runtime/, AiBookReader.pyw and the
+                                 launcher "Ai Book Reader.exe" (~1 MB) - what the Update button installs
+  update.json                    {"version", "runtime": "lite", "asset", "sha256", "size",
+                                  "lite": {"asset", "sha256", "size", "requirements"}}
+The AI parts (PyTorch, voices...) live in the portable's own Python. When a new version needs other
+versions of them, the Set up window installs just those after the restart.
+
+Older builds (one big PyInstaller exe) read the top-level fields; their runtime differs from "lite",
+so they are told to download the new portable once instead of half-updating.
 
 Only GitHub's public API is contacted; nothing about the user is sent."""
 from __future__ import annotations
@@ -30,6 +35,7 @@ API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 EXE_NAME = "Ai Book Reader.exe"
 HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "AiBookReader-Updater"}
+LITE_DIRS = ("app", "assets", "runtime")          # replaced as a whole by a lite update
 
 
 class UpdateError(Exception):
@@ -47,9 +53,13 @@ class Release:
     size: int
     sha256: str
     runtime: str
+    needs_setup: bool = False       # lite: the new version installs other AI parts after the restart
+    full_download: bool = False     # no package this copy can install: download the portable again
 
     @property
     def runtime_ok(self) -> bool:
+        if self.full_download:
+            return False
         mine = local_runtime()
         return not mine or not self.runtime or mine == self.runtime
 
@@ -70,6 +80,16 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def is_lite() -> bool:
+    from .setup_runtime import is_lite as lite
+    return lite()
+
+
+def can_install() -> bool:
+    """Can this copy update itself (portable app), or is it run from source?"""
+    return is_frozen() or is_lite()
+
+
 def local_runtime() -> str:
     try:
         return json.loads((resource_dir() / "runtime.json").read_text(encoding="utf-8")).get("runtime", "")
@@ -77,8 +97,9 @@ def local_runtime() -> str:
         return ""
 
 
-def check(timeout: float = 10) -> Release | None:
+def check(timeout: float = 10, lite: bool | None = None) -> Release | None:
     """The newest release when it is newer than this app, else None."""
+    lite = is_lite() if lite is None else lite
     try:
         r = requests.get(API_LATEST, headers=HEADERS, timeout=timeout)
     except requests.RequestException as e:
@@ -99,18 +120,29 @@ def check(timeout: float = 10) -> Release | None:
         m = requests.get(manifest["browser_download_url"], headers=HEADERS, timeout=timeout).json()
     except (requests.RequestException, ValueError) as e:
         raise UpdateError(f"Could not read the update description: {e}") from e
-    z = assets.get(m.get("asset", ""))
+    runtime = m.get("runtime", "")
+    needs_setup = full = False
+    part = m
+    if lite:
+        if m.get("lite"):
+            part, runtime = m["lite"], ""
+            from .setup_runtime import installed
+            needs_setup = bool(part.get("requirements")) and part["requirements"] != installed().get("requirements")
+        else:                                         # a release without a small-portable package
+            full = True
+    z = assets.get(part.get("asset", ""))
     if not z:
-        raise UpdateError(f"Release {tag} is missing {m.get('asset')}")
-    sha = m.get("sha256", "")
+        raise UpdateError(f"Release {tag} is missing {part.get('asset') or 'its app package'}")
+    sha = part.get("sha256", "")
     digest = z.get("digest") or ""            # GitHub's own fingerprint, when it publishes one
     if digest.startswith("sha256:"):
         if sha and digest[7:] != sha:
             raise UpdateError("The update's fingerprints do not match. Not installing it.")
         sha = digest[7:]
-    return Release(version=tag.lstrip("vV"), tag=tag, notes=rel.get("body") or "", page=rel.get("html_url") or RELEASES_PAGE,
-                   zip_url=z["browser_download_url"], zip_name=z["name"], size=int(z.get("size") or 0),
-                   sha256=sha, runtime=m.get("runtime", ""))
+    return Release(version=tag.lstrip("vV"), tag=tag, notes=rel.get("body") or "",
+                   page=rel.get("html_url") or RELEASES_PAGE, zip_url=z["browser_download_url"], zip_name=z["name"],
+                   size=int(z.get("size") or 0), sha256=sha, runtime=runtime, needs_setup=needs_setup,
+                   full_download=full)
 
 
 def download(rel: Release, progress=None, cancelled=None) -> Path:
@@ -142,26 +174,70 @@ def download(rel: Release, progress=None, cancelled=None) -> Path:
     return out
 
 
+def _safe_names(z: zipfile.ZipFile) -> list[str]:
+    names = []
+    for name in z.namelist():
+        parts = Path(name).parts
+        if name.endswith("/") or ".." in parts or name.startswith(("/", "\\")) or (parts and ":" in parts[0]):
+            continue
+        names.append(name)
+    return names
+
+
+def _replace_exe(dest: Path) -> None:
+    """A running exe cannot be overwritten, but it can be renamed (deleted on the next start)."""
+    if dest.exists() and dest.suffix.lower() == ".exe":
+        old = dest.with_name(dest.name + ".old")
+        old.unlink(missing_ok=True)
+        dest.rename(old)
+
+
 def install(zip_path: Path, target: Path | None = None) -> Path:
-    """Put the new files in place. The running exe cannot be overwritten, but it can be renamed:
-    it becomes '<exe>.old' and is deleted on the next start. Returns the new exe's path."""
+    """Put the new files in place and return the program to restart."""
     target = Path(target or app_dir())
     with zipfile.ZipFile(zip_path) as z:
-        names = z.namelist()
+        names = _safe_names(z)
         if EXE_NAME not in names:
             raise UpdateError("The update package has no program file.")
-        for name in names:
-            if name.endswith("/") or ".." in Path(name).parts:
-                continue
+        if "app/main.py" in names:
+            _install_lite(z, names, target)
+            return target / EXE_NAME
+        for name in names:                      # PyInstaller build: exe + a few files in _internal
             dest = target / name
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists() and dest.suffix.lower() == ".exe":
-                old = dest.with_name(dest.name + ".old")
-                old.unlink(missing_ok=True)
-                dest.rename(old)
+            _replace_exe(dest)
             with z.open(name) as src, open(dest, "wb") as f:
                 shutil.copyfileobj(src, f)
     return target / EXE_NAME
+
+
+def _install_lite(z: zipfile.ZipFile, names: list[str], target: Path) -> None:
+    """Small portable: unpack next to the app, then swap the app/assets/runtime folders as a whole
+    (so files removed in the new version are really gone); the old ones are deleted on the next start."""
+    stage = target / ".update-new"
+    shutil.rmtree(stage, ignore_errors=True)
+    for name in names:
+        dest = stage / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with z.open(name) as src, open(dest, "wb") as f:
+            shutil.copyfileobj(src, f)
+    for item in sorted(stage.iterdir()):
+        dest = target / item.name
+        if item.is_dir():
+            old = target / f"{item.name}.old"
+            shutil.rmtree(old, ignore_errors=True)
+            try:
+                if dest.exists():
+                    dest.rename(old)
+                item.rename(dest)
+            except OSError:                     # a file is locked (virus scanner...): copy over instead
+                if not dest.exists() and old.exists():
+                    old.rename(dest)
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            _replace_exe(dest)
+            shutil.copy2(item, dest)
+    shutil.rmtree(stage, ignore_errors=True)
 
 
 def restart(exe: Path) -> None:
@@ -170,11 +246,15 @@ def restart(exe: Path) -> None:
 
 
 def cleanup_old() -> None:
-    """Remove the previous exe left behind by an update."""
-    if not is_frozen():
+    """Remove what the previous update left behind."""
+    if not can_install():
         return
-    for p in app_dir().glob("*.exe.old"):
+    root = app_dir()
+    for p in root.glob("*.exe.old"):
         try:
             p.unlink()
         except OSError:
             pass
+    for name in LITE_DIRS:
+        shutil.rmtree(root / f"{name}.old", ignore_errors=True)
+    shutil.rmtree(root / ".update-new", ignore_errors=True)

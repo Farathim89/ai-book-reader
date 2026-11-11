@@ -416,13 +416,16 @@ class UpdateDialog(QDialog):
         lay.addWidget(head)
         size = f"{rel.size / 1e6:.0f} MB" if rel.size else ""
         if not rel.runtime_ok:
-            sub_text = (f"You have {current}. This version also needs a newer AI runtime, so it cannot be installed "
-                        "with one click: open the release page to download the full portable app.")
+            sub_text = (f"You have {current}. This version cannot be installed with one click: open the release "
+                        "page and download the new portable app once (then move your data folder into it).")
         elif not frozen:
-            sub_text = f"You have {current} and are running from source: update with git, then build again."
+            sub_text = f"You have {current} and are running from source: update with git (git pull)."
         else:
             sub_text = (f"You have {current}. Install now downloads {size}, checks its SHA-256 fingerprint, "
                         "installs it and restarts. Your library, settings and voices stay as they are.")
+            if getattr(rel, "needs_setup", False):
+                sub_text += (" This version also needs newer AI parts: after the restart the Set up window "
+                             "downloads them.")
         info = muted(sub_text)
         info.setWordWrap(True)
         lay.addWidget(info)
@@ -709,7 +712,7 @@ class SettingsDialog(QDialog):
         from .. import updater
         w = QWidget()
         f = QFormLayout(w)
-        f.addRow("Version", QLabel(f"{__version__}" + ("" if updater.is_frozen() else "  (running from source)")))
+        f.addRow("Version", QLabel(f"{__version__}" + ("" if updater.can_install() else "  (running from source)")))
         self.check_updates = QCheckBox("Check for updates automatically (asks GitHub for the latest release)")
         self.check_updates.setChecked(bool(settings.get("check_updates", True)))
         f.addRow("", self.check_updates)
@@ -724,6 +727,16 @@ class SettingsDialog(QDialog):
         self.notify.setChecked(bool(settings.get("notify_tasks", True)))
         f.addRow("", self.notify)
         f.addRow("", muted(f"Updates come from github.com/{updater.REPO}. No personal data is sent."))
+        self.repair_requested = False
+        if updater.is_lite():
+            from ..setup_runtime import installed
+            done = installed()
+            repair = QPushButton("Repair AI parts…")
+            repair.setToolTip("Closes the app and opens the Set up window to install PyTorch, the voices and OCR again")
+            repair.clicked.connect(self._repair)
+            f.addRow("AI parts", muted(f"Installed {done.get('date', '?')} · "
+                                       f"{'NVIDIA GPU (CUDA)' if done.get('device') == 'cuda' else 'CPU only'}"))
+            f.addRow("", repair)
         tabs.addTab(w, "App")
         self.found_release = None
 
@@ -735,6 +748,13 @@ class SettingsDialog(QDialog):
         for i in range(tabs.count()):
             if tabs.tabText(i) == start_tab:
                 tabs.setCurrentIndex(i)
+
+    def _repair(self) -> None:
+        if QMessageBox.question(self, "Repair AI parts", "Close Ai Book Reader and open the Set up window?\n\n"
+                                "Running tasks are stopped; exports continue where they stopped next time."
+                                ) == QMessageBox.Yes:
+            self.repair_requested = True
+            self.reject()
 
     def _check_now(self) -> None:
         from .. import updater

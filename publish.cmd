@@ -1,8 +1,9 @@
 @echo off
-rem Builds the app and publishes it as a GitHub release (app update for the Update button).
-rem Bump __version__ in app\__init__.py and commit first. "publish.cmd --dry-run" only makes the files.
+rem Releases a new version: bump __version__ in app\__init__.py and commit first.
+rem Tags v<version> and pushes; GitHub Actions tests, builds and publishes the release.
+rem   publish.cmd --dry-run        show what would happen
+rem   publish.cmd --notes file.md  release notes from a file (default: commit subjects)
 cd /d "%~dp0"
-call build.cmd || goto :error
 .venv\Scripts\python.exe tools\publish.py %* || goto :error
 exit /b 0
 :error

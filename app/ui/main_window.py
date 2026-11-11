@@ -148,7 +148,7 @@ class MainWindow(QMainWindow):
         self._startup_started = time.time()
         self._startup_timer.timeout.connect(self._maybe_start_jobs)
         self._startup_timer.start()
-        if self.settings.get("check_updates", True) and (updater.is_frozen() or os.environ.get("ABR_UPDATE_TEST")):
+        if self.settings.get("check_updates", True) and (updater.can_install() or os.environ.get("ABR_UPDATE_TEST")):
             QTimer.singleShot(8000, self._check_updates)
 
     # =========================================================================== startup
@@ -536,7 +536,7 @@ class MainWindow(QMainWindow):
         rel = self._release
         if rel is None:
             return
-        d = UpdateDialog(rel, updater.is_frozen(), updater.current_version(), self)
+        d = UpdateDialog(rel, updater.can_install(), updater.current_version(), self)
         if not d.exec():
             return
         if d.choice == "page":
@@ -1727,6 +1727,11 @@ class MainWindow(QMainWindow):
             counts[r["library"]] = counts.get(r["library"], 0) + 1
         d = SettingsDialog(self.settings, models, counts, start_tab, self)
         accepted = d.exec()
+        if d.repair_requested:
+            from ..setup_runtime import launch_app
+            launch_app("--setup")
+            self.close()
+            return
         if d.found_release is not None:
             self._update_checked(d.found_release, "")
         if accepted:

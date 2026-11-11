@@ -1,27 +1,23 @@
-"""Package the built app as an update and publish it as a GitHub release.
+"""Release a new version: tag it and push. GitHub Actions (.github/workflows/release.yml) then runs
+the tests, builds the small portable app and publishes the GitHub release.
 
-    python tools/publish.py            build must be done first (publish.cmd does both)
-    python tools/publish.py --dry-run  only make the files in releases/<version>/
+    python tools/publish.py                 tag v<version> (app/__init__.py) and push
+    python tools/publish.py --notes FILE    release notes from FILE (Markdown)
+    python tools/publish.py --dry-run       only show what would happen
 
-The release gets:  AiBookReader-app-<version>.zip  (exe + _internal/assets + _internal/runtime.json)
-                   update.json                     (version, runtime, asset, sha256, size)
-Release notes: releases/<version>/notes.md when it exists, otherwise the commit subjects since the
-last release tag.
+Without --notes the release notes are the commit subjects since the previous tag.
 """
-import hashlib
-import json
-import re
+import argparse
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from app import __version__  # noqa: E402
-from app.updater import EXE_NAME, REPO  # noqa: E402
+from app.updater import REPO  # noqa: E402
 
-DIST = ROOT / "dist" / "Ai Book Reader"
+NOREPLY = "users.noreply.github.com"
 
 
 def sh(*args, check=True) -> str:
@@ -31,55 +27,35 @@ def sh(*args, check=True) -> str:
     return r.stdout.strip()
 
 
-def notes_for(version: str, out: Path) -> Path:
-    custom = out / "notes.md"
-    if custom.exists():
-        return custom
-    last = sh("git", "describe", "--tags", "--abbrev=0", check=False)
-    rng = f"{last}..HEAD" if last else "HEAD"
-    subjects = [s for s in sh("git", "log", rng, "--format=%s").splitlines() if s.strip()]
-    body = f"## Ai Book Reader {version}\n\n" + "\n".join(f"- {s}" for s in subjects)
-    body += ("\n\n---\nUpdate from inside the app (**Update** button). This release contains the app update only; "
-             "the AI runtime (PyTorch, voices) stays as installed.")
-    custom.write_text(body, encoding="utf-8")
-    return custom
-
-
 def main() -> None:
-    dry = "--dry-run" in sys.argv
-    version = __version__
-    exe = DIST / EXE_NAME
-    runtime_file = DIST / "_internal" / "runtime.json"
-    if not exe.exists() or not runtime_file.exists():
-        raise SystemExit("Build first (build.cmd): dist is missing the exe or runtime.json")
-    out = ROOT / "releases" / version
-    out.mkdir(parents=True, exist_ok=True)
-    asset = f"AiBookReader-app-{version}.zip"
-    zpath = out / asset
-    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        z.write(exe, EXE_NAME)
-        z.write(runtime_file, "_internal/runtime.json")
-        for p in sorted((DIST / "_internal" / "assets").rglob("*")):
-            if p.is_file():
-                z.write(p, p.relative_to(DIST).as_posix())
-    sha = hashlib.sha256(zpath.read_bytes()).hexdigest()
-    manifest = {"version": version, "runtime": json.loads(runtime_file.read_text())["runtime"],
-                "asset": asset, "sha256": sha, "size": zpath.stat().st_size}
-    (out / "update.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    notes = notes_for(version, out)
-    print(f"{asset}: {zpath.stat().st_size / 1e6:.1f} MB, sha256 {sha[:16]}..., runtime {manifest['runtime']}")
-    if dry:
-        print("dry run - nothing published")
-        return
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--notes", help="Markdown file with the release notes")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    tag = f"v{__version__}"
     if sh("git", "status", "--porcelain"):
         raise SystemExit("Commit your changes first.")
+    if sh("git", "tag", "-l", tag) or sh("git", "ls-remote", "--tags", "origin", tag, check=False):
+        raise SystemExit(f"{tag} already exists - bump __version__ in app/__init__.py")
+    last = sh("git", "describe", "--tags", "--abbrev=0", check=False)
+    emails = set(sh("git", "log", f"{last}..HEAD" if last else "HEAD", "--format=%ae%n%ce").split())
+    private = [e for e in emails if e and not e.endswith(NOREPLY)]
+    if private:
+        raise SystemExit(f"Commits with a non-noreply e-mail would be published: {', '.join(sorted(private))}")
+    if a.notes:
+        message = Path(a.notes).read_text(encoding="utf-8").strip()
+    else:
+        subjects = sh("git", "log", f"{last}..HEAD" if last else "HEAD", "--format=%s").splitlines()
+        message = "\n".join(f"- {s}" for s in subjects if s.strip()) or "- Maintenance"
+    print(f"Release {tag} (previous: {last or 'none'})\n\n{message}\n")
+    if a.dry_run:
+        print("dry run - nothing tagged or pushed")
+        return
+    sh("git", "tag", "-a", tag, "-m", message)
     sh("git", "push", "origin", "HEAD")
-    tag = f"v{version}"
-    if tag in sh("gh", "release", "list", "--repo", REPO, "--limit", "100", check=False):
-        raise SystemExit(f"Release {tag} already exists - bump __version__ in app/__init__.py")
-    sh("gh", "release", "create", tag, str(zpath), str(out / "update.json"), "--repo", REPO,
-       "--title", f"Ai Book Reader {version}", "--notes-file", str(notes), "--target", sh("git", "rev-parse", "HEAD"))
-    print(f"Published {tag}: https://github.com/{REPO}/releases/tag/{tag}")
+    sh("git", "push", "origin", tag)
+    print(f"Pushed {tag}. GitHub Actions builds and publishes it:\n"
+          f"  https://github.com/{REPO}/actions\n  https://github.com/{REPO}/releases/tag/{tag}")
 
 
 if __name__ == "__main__":
