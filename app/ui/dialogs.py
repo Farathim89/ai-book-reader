@@ -737,6 +737,10 @@ class SettingsDialog(QDialog):
             f.addRow("AI parts", muted(f"Installed {done.get('date', '?')} · "
                                        f"{'NVIDIA GPU (CUDA)' if done.get('device') == 'cuda' else 'CPU only'}"))
             f.addRow("", repair)
+            shortcuts = QPushButton("Add to desktop and Start menu")
+            shortcuts.setToolTip("Shortcuts to this portable app (they also keep taskbar pins working)")
+            shortcuts.clicked.connect(self._make_shortcuts)
+            f.addRow("Shortcuts", shortcuts)
         tabs.addTab(w, "App")
         self.found_release = None
 
@@ -748,6 +752,15 @@ class SettingsDialog(QDialog):
         for i in range(tabs.count()):
             if tabs.tabText(i) == start_tab:
                 tabs.setCurrentIndex(i)
+
+    def _make_shortcuts(self) -> None:
+        from ..winshell import make_shortcuts
+        try:
+            done = make_shortcuts()
+        except OSError as e:
+            QMessageBox.warning(self, "Shortcuts", f"Could not make the shortcuts: {e}")
+            return
+        QMessageBox.information(self, "Shortcuts", "Added:\n" + "\n".join(str(p) for p in done))
 
     def _repair(self) -> None:
         if QMessageBox.question(self, "Repair AI parts", "Close Ai Book Reader and open the Set up window?\n\n"

@@ -71,6 +71,8 @@ def main() -> int:
     tts = TTSService()
     win = MainWindow(settings, library, tts)
     win.show()
+    from .winshell import set_window_identity
+    set_window_identity(int(win.winId()))       # taskbar pins start Ai Book Reader.exe, not pythonw.exe
 
     # a book passed on the command line (e.g. "Open with")
     for arg in sys.argv[1:]:

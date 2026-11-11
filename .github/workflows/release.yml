@@ -1,5 +1,6 @@
 # Builds the small portable app and publishes a GitHub release when a version tag is pushed
-# (tools/publish.py makes the tag). "Run workflow" by hand only builds and keeps the files as an artifact.
+# (tools/publish.py makes the tag). Before publishing it installs the AI parts for real (CPU) into the
+# built portable and runs the self-test. "Run workflow" by hand does all that without publishing.
 name: Release
 
 on:
@@ -45,6 +46,9 @@ jobs:
           } else {
             python tools/build_lite.py
           }
+
+      - name: Test a real Set up (CPU) and the self-test
+        run: python tools/test_setup.py
 
       - name: Keep the files
         uses: actions/upload-artifact@v7

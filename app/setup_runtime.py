@@ -431,4 +431,6 @@ def run_setup_window(mode: str) -> int:
 
     w = SetupWindow()
     w.show()
+    from .winshell import set_window_identity
+    set_window_identity(int(w.winId()))
     return app.exec()
