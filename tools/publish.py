@@ -51,7 +51,7 @@ def main() -> None:
     if a.dry_run:
         print("dry run - nothing tagged or pushed")
         return
-    sh("git", "tag", "-a", tag, "-m", message)
+    sh("git", "tag", "-a", "--cleanup=verbatim", tag, "-m", message)      # keep "### headings"
     sh("git", "push", "origin", "HEAD")
     sh("git", "push", "origin", tag)
     print(f"Pushed {tag}. GitHub Actions builds and publishes it:\n"
