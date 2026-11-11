@@ -1,0 +1,149 @@
+"""Voice catalogue: Kokoro's ready-made voices, Chatterbox's built-in voice and cloned voices."""
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from ..paths import sub
+
+# (id, name, gender, accent) - best-rated voices first
+KOKORO_VOICES = [
+    ("af_heart", "Heart", "female", "US"), ("af_bella", "Bella", "female", "US"),
+    ("af_nicole", "Nicole", "female", "US"), ("bf_emma", "Emma", "female", "UK"),
+    ("af_sarah", "Sarah", "female", "US"), ("af_aoede", "Aoede", "female", "US"),
+    ("af_kore", "Kore", "female", "US"), ("bf_isabella", "Isabella", "female", "UK"),
+    ("af_sky", "Sky", "female", "US"), ("af_nova", "Nova", "female", "US"),
+    ("bf_alice", "Alice", "female", "UK"), ("af_alloy", "Alloy", "female", "US"),
+    ("af_jessica", "Jessica", "female", "US"), ("bf_lily", "Lily", "female", "UK"),
+    ("af_river", "River", "female", "US"),
+    ("am_michael", "Michael", "male", "US"), ("am_fenrir", "Fenrir", "male", "US"),
+    ("am_puck", "Puck", "male", "US"), ("bm_george", "George", "male", "UK"),
+    ("bm_fable", "Fable", "male", "UK"), ("am_adam", "Adam", "male", "US"),
+    ("bm_lewis", "Lewis", "male", "UK"), ("am_echo", "Echo", "male", "US"),
+    ("am_eric", "Eric", "male", "US"), ("am_liam", "Liam", "male", "US"),
+    ("bm_daniel", "Daniel", "male", "UK"), ("am_onyx", "Onyx", "male", "US"),
+]
+DEFAULT_VOICE = "kokoro:af_heart"
+CHATTERBOX_DEFAULT = "chatterbox:default"
+
+
+@dataclass(frozen=True)
+class Voice:
+    id: str          # "kokoro:af_heart", "chatterbox:default", "clone:<slug>"
+    name: str
+    gender: str      # "female" / "male" / "neutral"
+    engine: str      # "kokoro" / "chatterbox"
+    detail: str      # shown in lists, e.g. "US female"
+
+    @property
+    def label(self) -> str:
+        return f"{self.name}  ·  {self.detail}"
+
+
+def kokoro_voices() -> list[Voice]:
+    return [Voice(f"kokoro:{vid}", name, g, "kokoro", f"{acc} {g}") for vid, name, g, acc in KOKORO_VOICES]
+
+
+# ---- cloned voices ---------------------------------------------------------
+def clones_dir() -> Path:
+    return sub("voices")
+
+
+def slugify(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return s or "voice"
+
+
+def clone_voices() -> list[Voice]:
+    out = []
+    for d in sorted(clones_dir().iterdir()) if clones_dir().exists() else []:
+        meta = d / "voice.json"
+        if d.is_dir() and meta.exists() and (d / "ref.wav").exists():
+            try:
+                m = json.loads(meta.read_text(encoding="utf-8"))
+            except ValueError:
+                continue
+            out.append(Voice(f"clone:{d.name}", m.get("name", d.name), m.get("gender", "neutral"),
+                             "chatterbox", "cloned voice"))
+    return out
+
+
+def clone_ref_path(voice_id: str) -> Path | None:
+    if not voice_id.startswith("clone:"):
+        return None
+    p = clones_dir() / voice_id.split(":", 1)[1] / "ref.wav"
+    return p if p.exists() else None
+
+
+def ffmpeg_exe() -> str | None:
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def load_audio_any(path: str, sr: int = 24000) -> np.ndarray:
+    """Decode any audio file to mono float32 at ``sr`` (via ffmpeg, falls back to soundfile)."""
+    exe = ffmpeg_exe()
+    if exe:
+        r = subprocess.run([exe, "-hide_banner", "-loglevel", "error", "-i", str(path), "-ac", "1",
+                            "-ar", str(sr), "-f", "f32le", "pipe:1"], capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if r.returncode == 0 and r.stdout:
+            return np.frombuffer(r.stdout, dtype=np.float32).copy()
+    import soundfile as sf
+    data, file_sr = sf.read(str(path), dtype="float32", always_2d=True)
+    data = data.mean(axis=1)
+    if file_sr != sr:
+        import librosa
+        data = librosa.resample(data, orig_sr=file_sr, target_sr=sr)
+    return data.astype(np.float32)
+
+
+def add_clone(name: str, gender: str, source: str, start: float = 0.0, seconds: float = 20.0) -> Voice:
+    """Store a reference clip (trimmed, loudness-levelled 24 kHz mono WAV) for a cloned voice."""
+    import soundfile as sf
+    audio = load_audio_any(source, 24000)
+    a = audio[int(start * 24000): int((start + seconds) * 24000)]
+    if len(a) < 6 * 24000:
+        raise ValueError("The voice sample must have at least 6 seconds of speech (10-30 s works best).")
+    peak = float(np.max(np.abs(a))) or 1.0
+    a = (a / peak * 0.9).astype(np.float32)
+    slug = slugify(name)
+    base, k = slug, 2
+    while (clones_dir() / slug).exists():
+        slug = f"{base}-{k}"
+        k += 1
+    d = clones_dir() / slug
+    d.mkdir(parents=True)
+    sf.write(str(d / "ref.wav"), a, 24000, subtype="PCM_16")
+    (d / "voice.json").write_text(json.dumps({"name": name, "gender": gender, "source": str(source)}),
+                                  encoding="utf-8")
+    return Voice(f"clone:{slug}", name, gender, "chatterbox", "cloned voice")
+
+
+def remove_clone(voice_id: str) -> None:
+    if voice_id.startswith("clone:"):
+        shutil.rmtree(clones_dir() / voice_id.split(":", 1)[1], ignore_errors=True)
+
+
+def all_voices() -> list[Voice]:
+    return kokoro_voices() + [Voice(CHATTERBOX_DEFAULT, "Chatterbox", "female", "chatterbox",
+                                    "expressive, built-in")] + clone_voices()
+
+
+def find_voice(voice_id: str | None) -> Voice:
+    for v in all_voices():
+        if v.id == voice_id:
+            return v
+    return kokoro_voices()[0]
