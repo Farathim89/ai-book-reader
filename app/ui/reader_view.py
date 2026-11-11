@@ -40,6 +40,15 @@ class TextReader(QTextBrowser):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
 
+    def restyle(self) -> None:
+        self.setStyleSheet(f"QTextBrowser {{ background: {theme.READER_BG}; color: {theme.READER_TEXT}; border: none; }}")
+        if self.book is not None and self.ci >= 0:
+            ci, cur = self.ci, self.current
+            self.ci = -1
+            self.show_chapter(self.book, ci)
+            if cur is not None:
+                self.highlight(cur, center=True)
+
     # ---- layout -------------------------------------------------------------
     def resizeEvent(self, e) -> None:
         # margins first, so the document re-wraps to the new column width in super().resizeEvent.

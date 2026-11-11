@@ -382,16 +382,192 @@ class ExportDialog(QDialog):
         self.accept()
 
 
+# ---------------------------------------------------------------------------------- libraries
+class LibrariesTab(QWidget):
+    """ABS-style library management: name, folders and right-to-left comics per library."""
+
+    def __init__(self, libs: list[dict], counts: dict[str, int], parent=None):
+        super().__init__(parent)
+        import copy
+        self.libs = copy.deepcopy(libs)
+        self.counts = counts
+        self.deleted: list[str] = []
+        lay = QHBoxLayout(self)
+        left = QVBoxLayout()
+        self.list = QListWidget()
+        self.list.setFixedWidth(200)
+        left.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        new = QPushButton("New library")
+        new.clicked.connect(self._new)
+        self.delete = QPushButton("Delete")
+        self.delete.setObjectName("Danger")
+        self.delete.clicked.connect(self._delete)
+        row.addWidget(new)
+        row.addWidget(self.delete)
+        left.addLayout(row)
+        lay.addLayout(left)
+
+        right = QVBoxLayout()
+        form = QFormLayout()
+        self.name = QLineEdit()
+        self.name.textEdited.connect(self._renamed)
+        form.addRow("Name", self.name)
+        right.addLayout(form)
+        right.addWidget(QLabel("Folders"))
+        self.folders = QListWidget()
+        right.addWidget(self.folders, 1)
+        frow = QHBoxLayout()
+        addf = QPushButton("Add folder…")
+        addf.clicked.connect(self._add_folder)
+        self.remf = QPushButton("Remove folder")
+        self.remf.clicked.connect(self._remove_folder)
+        frow.addWidget(addf)
+        frow.addWidget(self.remf)
+        frow.addStretch(1)
+        right.addLayout(frow)
+        self.rtl = QCheckBox("Comics in this library read right-to-left (manga)")
+        self.rtl.toggled.connect(self._rtl)
+        right.addWidget(self.rtl)
+        self.info = muted("")
+        self.info.setWordWrap(True)
+        right.addWidget(self.info)
+        lay.addLayout(right, 1)
+        self.list.currentRowChanged.connect(self._load)
+        self._fill(0)
+
+    def _fill(self, select: int) -> None:
+        self.list.blockSignals(True)
+        self.list.clear()
+        for lib in self.libs:
+            self.list.addItem(lib["name"])
+        self.list.blockSignals(False)
+        if self.libs:
+            self.list.setCurrentRow(max(0, min(select, len(self.libs) - 1)))
+        self._load(self.list.currentRow())
+
+    def _cur(self) -> dict | None:
+        i = self.list.currentRow()
+        return self.libs[i] if 0 <= i < len(self.libs) else None
+
+    def _load(self, i: int) -> None:
+        lib = self._cur()
+        for w in (self.name, self.folders, self.rtl, self.remf, self.delete):
+            w.setEnabled(lib is not None)
+        self.folders.clear()
+        if not lib:
+            self.name.clear()
+            self.info.setText("No libraries yet. Create one and add a folder with books.")
+            return
+        self.name.setText(lib["name"])
+        for f in lib["folders"]:
+            self.folders.addItem(f)
+        self.rtl.blockSignals(True)
+        self.rtl.setChecked(bool(lib.get("rtl")))
+        self.rtl.blockSignals(False)
+        n = self.counts.get(lib["name"], 0)
+        self.info.setText(f"{n} book{'s' if n != 1 else ''}. Folders are scanned for new books when the app starts. "
+                          "Removing a folder or library takes its books out of the app; the files stay on disk.")
+
+    def _renamed(self, text: str) -> None:
+        lib = self._cur()
+        if lib is not None:
+            old = lib["name"]
+            lib["name"] = text
+            if old in self.counts:
+                self.counts[text] = self.counts.pop(old)
+            self.list.currentItem().setText(text)
+
+    def _new(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "New library", "Library name:")
+        if ok and name.strip():
+            self.libs.append({"name": name.strip(), "folders": [], "rtl": False})
+            self._fill(len(self.libs) - 1)
+            self._add_folder()
+
+    def _delete(self) -> None:
+        lib = self._cur()
+        if not lib:
+            return
+        n = self.counts.get(lib["name"], 0)
+        if QMessageBox.question(self, "Delete library",
+                                f"Delete the library “{lib['name']}”?\n\nIts {n} books are removed from the "
+                                "app. The files themselves stay on disk.") != QMessageBox.Yes:
+            return
+        self.deleted.append(lib["name"])
+        i = self.list.currentRow()
+        self.libs.pop(i)
+        self._fill(i)
+
+    def _add_folder(self) -> None:
+        lib = self._cur()
+        if not lib:
+            return
+        d = QFileDialog.getExistingDirectory(self, f"Add a folder to {lib['name']}")
+        if d and d not in lib["folders"]:
+            lib["folders"].append(d)
+            self._load(self.list.currentRow())
+
+    def _remove_folder(self) -> None:
+        lib = self._cur()
+        it = self.folders.currentItem()
+        if lib and it:
+            lib["folders"].remove(it.text())
+            self._load(self.list.currentRow())
+
+    def _rtl(self, on: bool) -> None:
+        lib = self._cur()
+        if lib is not None:
+            lib["rtl"] = on
+
+    def result(self) -> list[dict]:
+        out, seen = [], set()
+        for lib in self.libs:
+            name = lib["name"].strip() or "Library"
+            base, k = name, 2
+            while name.lower() in seen:
+                name = f"{base} {k}"
+                k += 1
+            seen.add(name.lower())
+            out.append({"name": name, "folders": list(lib["folders"]), "rtl": bool(lib.get("rtl"))})
+        return out
+
+
 # ---------------------------------------------------------------------------------- settings
 class SettingsDialog(QDialog):
-    def __init__(self, settings, ollama_models: list[str], parent=None):
+    def __init__(self, settings, ollama_models: list[str], library_counts: dict | None = None,
+                 start_tab: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(560, 470)
+        self.resize(820, 560)
         self.s = settings
         lay = QVBoxLayout(self)
         tabs = QTabWidget()
         lay.addWidget(tabs, 1)
+
+        # libraries
+        from ..library.libraries import libraries
+        self.libraries_tab = LibrariesTab(libraries(settings), dict(library_counts or {}))
+        tabs.addTab(self.libraries_tab, "Libraries")
+
+        # appearance
+        from . import shelf as shelf_mod
+        w = QWidget()
+        f = QFormLayout(w)
+        self.theme_box = QComboBox()
+        self.theme_box.addItems(list(theme.THEMES))
+        self.theme_box.setCurrentText(settings.get("theme", "Audiobookshelf"))
+        self.shelf_box = QComboBox()
+        self.shelf_box.addItems(list(shelf_mod.SHELF_STYLES))
+        self.shelf_box.setCurrentText(settings.get("shelf_style", "Walnut"))
+        self.titles = QCheckBox("Show titles on the covers")
+        self.titles.setChecked(bool(settings.get("show_titles", False)))
+        f.addRow("Colour theme", self.theme_box)
+        f.addRow("Bookshelf", self.shelf_box)
+        f.addRow("", self.titles)
+        f.addRow("", muted("Plain uses the colours of the theme. Changes apply right away."))
+        tabs.addTab(w, "Appearance")
 
         # reading
         w = QWidget()
@@ -463,6 +639,9 @@ class SettingsDialog(QDialog):
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+        for i in range(tabs.count()):
+            if tabs.tabText(i) == start_tab:
+                tabs.setCurrentIndex(i)
 
     def _spin(self, v: float) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
@@ -490,5 +669,11 @@ class SettingsDialog(QDialog):
         s["ollama_url"] = self.ollama_url.text().strip() or "http://127.0.0.1:11434"
         s["text_model"] = self.text_model.currentText().strip()
         s["vision_model"] = self.vision_model.currentText().strip()
+        s["theme"] = self.theme_box.currentText()
+        s["shelf_style"] = self.shelf_box.currentText()
+        s["show_titles"] = self.titles.isChecked()
+        self.old_libraries = [dict(lib, folders=list(lib["folders"])) for lib in (s.get("libraries") or [])]
+        s["libraries"] = self.libraries_tab.result()
+        s["library_folders"] = [f for lib in s["libraries"] for f in lib["folders"]]
         s.save()
         self.accept()

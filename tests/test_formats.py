@@ -129,6 +129,20 @@ def _with_encryption(src, dst, uri):
     return dst
 
 
+def test_epub_with_broken_metadata_xml(books, tmp_path):
+    import zipfile
+    dst = tmp_path / "broken.epub"
+    with zipfile.ZipFile(books["epub"]) as zin, zipfile.ZipFile(dst, "w") as zout:
+        for n in zin.namelist():
+            data = zin.read(n)
+            if n.endswith(".opf"):   # the real-world breakage: a mangled attribute in <metadata>
+                data = data.replace(b"<dc:creator>", b'<meta refines="#x" property="y" refines">"#x">15</meta>'
+                                                     b"<dc:creator>")
+            zout.writestr(n, data)
+    b = load_book(str(dst))
+    assert b.title == "The Flooded House" and len(b.chapters) == 2 and b.unit_count() > 10
+
+
 def test_epub_font_obfuscation_is_not_drm(books, tmp_path):
     from app.formats import BookError
     ok = _with_encryption(books["epub"], tmp_path / "fonts.epub", "OEBPS/fonts/Serif.otf")

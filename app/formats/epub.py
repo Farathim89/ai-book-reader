@@ -26,6 +26,25 @@ class EpubError(Exception):
     pass
 
 
+def _rebuild_opf(raw: bytes):
+    """A package file whose metadata is broken XML loses its manifest and spine when parsed in
+    recover mode. Rebuild it from the manifest and spine sections plus title/author/cover."""
+    import re
+    text = raw.decode("utf-8", "replace")
+
+    def section(tag: str) -> str:
+        m = re.search(rf"<(?:opf:)?{tag}\b[^>]*>.*?</(?:opf:)?{tag}>", text, re.S | re.I)
+        return m.group(0) if m else ""
+    dc = "".join(m.group(0) for m in re.finditer(r"<dc:(title|creator)\b[^>]*>.*?</dc:\1>", text, re.S))
+    cover = "".join(re.findall(r"<meta\s+name=\"cover\"\s+content=\"[^\"]*\"\s*/>", text))
+    synthetic = (f'<package xmlns="{NS["opf"]}" xmlns:opf="{NS["opf"]}" xmlns:dc="{NS["dc"]}">'
+                 f"<metadata>{dc}{cover}</metadata>{section('manifest')}{section('spine')}</package>")
+    root = etree.fromstring(synthetic.encode("utf-8"), _PARSER)
+    if root is None or root.find(".//opf:manifest/opf:item", NS) is None:
+        raise EpubError("The EPUB's package file is damaged (no list of contents).")
+    return root
+
+
 class Epub:
     def __init__(self, path: str):
         self.path = path
@@ -46,7 +65,10 @@ class Epub:
                 raise EpubError("EPUB has no package (.opf) file")
             self.opf_path = opfs[0]
         self.base = posixpath.dirname(self.opf_path)
-        self.opf = etree.fromstring(self.read(self.opf_path), _PARSER)
+        raw_opf = self.read(self.opf_path)
+        self.opf = etree.fromstring(raw_opf, _PARSER)
+        if self.opf is None or self.opf.find(".//opf:manifest/opf:item", NS) is None:
+            self.opf = _rebuild_opf(raw_opf)
         self.manifest: dict[str, tuple[str, str, str]] = {}
         for it in self.opf.iterfind(".//opf:manifest/opf:item", NS):
             href = self._join(it.get("href", ""))

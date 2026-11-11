@@ -25,9 +25,7 @@ def main() -> int:
     warnings.filterwarnings("ignore")
 
     if "--selftest" in sys.argv:
-        rc = selftest()
-        sys.stdout.flush()
-        os._exit(rc)
+        hard_exit(selftest())
 
     if sys.platform == "win32":
         try:
@@ -48,7 +46,8 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("Farathim")
-    apply_theme(app)
+    settings = Settings()
+    apply_theme(app, settings.get("theme", "Audiobookshelf"))
 
     def excepthook(etype, value, tb):
         text = "".join(traceback.format_exception(etype, value, tb))
@@ -59,7 +58,6 @@ def main() -> int:
             pass
     sys.excepthook = excepthook
 
-    settings = Settings()
     library = Library()
     tts = TTSService()
     win = MainWindow(settings, library, tts)
@@ -70,14 +68,30 @@ def main() -> int:
         if os.path.isfile(arg):
             book_id = library.add(arg) or (library.by_path(arg) or {}).get("id")
             if book_id:
-                win.library_view.reload()
-                win.open_book(book_id)
+                win.navigate("book", id=book_id)
             break
 
     rc = app.exec()
     library.close()
-    sys.stdout.flush()
-    os._exit(rc)   # don't wait for daemon threads / CUDA teardown
+    hard_exit(rc)
+
+
+def hard_exit(rc: int = 0) -> None:
+    """End the process without unloading CUDA / audio DLLs one by one: their unload code can
+    crash while worker threads are still alive. Everything is already saved at this point."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.TerminateProcess(k32.GetCurrentProcess(), int(rc))
+        except Exception:
+            pass
+    os._exit(rc)
 
 
 def selftest() -> int:

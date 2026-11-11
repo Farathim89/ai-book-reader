@@ -144,14 +144,84 @@ def test_library_db(tmp_path, monkeypatch):
     assert bid and lib.add(str(p)) is None
     r = lib.get(bid)
     assert r["title"] == "The Flooded House" and r["cover"] and os.path.exists(r["cover"])
-    lib.update(bid, position=5, total=10)
-    assert lib.get(bid)["progress"] == 0.5
+    lib.update(bid, position=5, total=11)
+    assert lib.get(bid)["progress"] == 0.5 and not lib.get(bid)["finished"]
+    lib.update(bid, position=10)
+    assert lib.get(bid)["finished"]
     lib.update_settings(bid, narrator="kokoro:am_adam")
     assert lib.get(bid)["settings"]["narrator"] == "kokoro:am_adam"
     b1 = store.open_book(bid, str(p))
     b2 = store.open_book(bid, str(p))      # from the parse cache
     assert b1.unit_count() == b2.unit_count() and b2.unit_text(4) == b1.unit_text(4)
     lib.close()
+
+
+def test_details_series_description(tmp_path):
+    import shutil
+    from app.formats.details import read_details, series_from_title
+    d = tmp_path / "Asato Asato" / "86 Vol 1 (3)"
+    d.mkdir(parents=True)
+    p = shutil.copy(samples.make_epub(tmp_path / "x.epub"), d / "book.epub")
+    (d / "metadata.opf").write_text(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf"><metadata '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>86, Vol. 1</dc:title>'
+        "<dc:description>&lt;p&gt;A war &amp;amp; peace.&lt;/p&gt;</dc:description><dc:publisher>Yen On</dc:publisher>"
+        "<dc:date>2017-03-21T00:00:00+00:00</dc:date>"
+        '<meta name="calibre:series" content="86--EIGHTY-SIX"/><meta name="calibre:series_index" content="1"/>'
+        "</metadata></package>", encoding="utf-8")
+    det = read_details(str(p))
+    assert det["series"] == "86--EIGHTY-SIX" and det["series_index"] == 1.0
+    assert det["publisher"] == "Yen On" and det["year"] == 2017 and det["description"] == "A war & peace."
+    assert series_from_title("A Gentle Noble's Vacation Recommendation v03 (2021) (Digital)") == \
+        ("A Gentle Noble's Vacation Recommendation", 3.0)
+    assert series_from_title("How a Realist Hero Rebuilt the Kingdom, Vol. 12") == \
+        ("How a Realist Hero Rebuilt the Kingdom", 12.0)
+    assert series_from_title("Kiki's Delivery Service") is None
+
+
+def test_libraries_mapping():
+    from app.library.libraries import OTHER, add_folder, est_seconds, fmt_duration, library_of, libraries
+    s = {"library_folders": [r"H:\-=Books=-\EBooks"]}
+    assert libraries(s) == [{"name": "EBooks", "folders": [r"H:\-=Books=-\EBooks"]}]
+    add_folder(s, r"H:\-=Books=-\Manga")
+    add_folder(s, r"D:\Downloads\Some Manga", "Manga")
+    libs = libraries(s)
+    assert [l["name"] for l in libs] == ["EBooks", "Manga"] and len(libs[1]["folders"]) == 2
+    assert library_of(r"D:\Downloads\Some Manga\v01.cbz", libs) == "Manga"
+    assert library_of(r"H:\-=Books=-\EBooks\A\b.epub", libs) == "EBooks"
+    assert library_of(r"C:\elsewhere\b.epub", libs) == OTHER
+    assert fmt_duration(est_seconds(17 * 3600 * 7 + 17 * 240)) == "7 hr 4 min"
+
+
+def _rows():
+    def r(i, title, author="A", series=None, idx=None, started=False, finished=False, opened=0, added=0, lib="L1"):
+        return {"id": i, "title": title, "author": author, "series": series, "series_index": idx, "fmt": "epub",
+                "started": started, "finished": finished, "opened": opened, "added": added, "library": lib,
+                "progress": 0.5 if started else 0.0, "settings": {}, "chars": i * 100}
+    return [r(1, "The Vol 10", "Asato Asato", "86", 10, added=5),
+            r(2, "86 Vol 2", "Asato Asato", "86", 2, finished=True, opened=50, added=3),
+            r(3, "86 Vol 1", "Asato Asato", "86", 1, finished=True, opened=40, added=2),
+            r(4, "86 Vol 3", "Asato Asato", "86", 3, added=4),
+            r(5, "Kiki", "Eiko Kadono, Emily Balistrieri", started=True, opened=60, added=1, lib="L2"),
+            r(6, "Earthsea 1", "Ursula K. Le Guin", "Earthsea", 1, started=True, opened=10, added=6)]
+
+
+def test_views_sort_filter_groups():
+    from app.library import views
+    rows = _rows()
+    assert [r["id"] for r in views.apply_sort(rows, "Series")][:4] == [3, 2, 4, 1]   # 1, 2, 3, 10 (natural)
+    assert [r["id"] for r in views.apply_filter(rows, "In progress")] == [5, 6]
+    assert [r["id"] for r in views.in_library(rows, "L2")] == [5]
+    assert [r["id"] for r in views.search(rows, "kiki kadono")] == [5]
+    series = dict(views.series_groups(rows))
+    assert [b["id"] for b in series["86"]] == [3, 2, 4, 1]
+    authors = dict(views.author_groups(rows))
+    assert "Emily Balistrieri" in authors and len(authors["Asato Asato"]) == 4
+    shelves = dict(views.home_shelves(rows))
+    assert [b["id"] for b in shelves["Continue Reading"]] == [5, 6]
+    assert [b["id"] for b in shelves["Continue Series"]] == [4]       # next 86 volume after 2 finished ones
+    assert [b["id"] for b in shelves["Read Again"]] == [2, 3]
+    assert views.fmt_index(4.0) == "4" and views.fmt_index(4.5) == "4.5"
 
 
 def test_scan_folder_prefers_one_format_per_book(tmp_path):

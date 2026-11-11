@@ -47,6 +47,12 @@ class ComicReader(QGraphicsView):
         self._cache: OrderedDict[int, QPixmap] = OrderedDict()
         self.page_units: dict[int, list[int]] = {}
 
+    def restyle(self) -> None:
+        self.setBackgroundBrush(QColor(theme.READER_BG))
+        c = QColor(theme.ACCENT)
+        self.outline.setPen(QPen(c, 4))
+        self.outline.setBrush(QBrush(QColor(c.red(), c.green(), c.blue(), 40)))
+
     def set_book(self, book: Book, loader: Callable[[int], bytes]) -> None:
         self.book, self.loader = book, loader
         self._cache.clear()

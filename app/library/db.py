@@ -27,6 +27,23 @@ CREATE TABLE IF NOT EXISTS books (
     settings TEXT DEFAULT '{}'
 );
 """
+# columns added after 1.0 (created on old databases by _migrate)
+EXTRA_COLUMNS = {
+    "series": "TEXT", "series_index": "REAL", "description": "TEXT", "publisher": "TEXT",
+    "year": "INTEGER", "chars": "INTEGER DEFAULT 0", "details": "INTEGER DEFAULT 0",
+}
+DETAILS_VERSION = 1
+
+
+def cached_chars(book_id: int) -> int:
+    """Characters of text (for length estimates) from the parse cache, 0 when not parsed yet."""
+    import json
+    p = data_dir() / "books" / str(book_id) / "book.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))["book"]
+    except (OSError, ValueError, KeyError):
+        return 0
+    return sum(len(par[0]) for ch in d["chapters"] for par in ch["paragraphs"])
 
 
 def save_cover(book_id: int, data: bytes | None) -> str | None:
@@ -52,6 +69,10 @@ class Library:
         self.lock = threading.RLock()
         with self.lock:
             self.conn.executescript(SCHEMA)
+            have = {r[1] for r in self.conn.execute("PRAGMA table_info(books)")}
+            for col, decl in EXTRA_COLUMNS.items():
+                if col not in have:
+                    self.conn.execute(f"ALTER TABLE books ADD COLUMN {col} {decl}")
             self.conn.commit()
 
     # ---- queries ------------------------------------------------------------
@@ -77,8 +98,29 @@ class Library:
             d["settings"] = json.loads(d.get("settings") or "{}")
         except ValueError:
             d["settings"] = {}
-        d["progress"] = (d["position"] / d["total"]) if d.get("total") else 0.0
+        total = d.get("total") or 0
+        d["progress"] = (d["position"] / max(1, total - 1)) if total > 1 else 0.0
+        d["finished"] = total > 1 and d["position"] >= total - 1
+        d["started"] = bool(d.get("opened")) and (d["position"] or 0) > 0
         return d
+
+    def fill_details(self, book_id: int, with_length: bool = False) -> None:
+        """Series, description, publisher, year (and, if asked, length from the parse cache - slow)."""
+        from ..formats.details import read_details
+        r = self.get(book_id)
+        if not r:
+            return
+        d = read_details(r["path"], r["title"])
+        fields = {k: d.get(k) for k in ("series", "series_index", "description", "publisher", "year")}
+        fields["details"] = DETAILS_VERSION
+        if with_length and not r.get("chars"):
+            fields["chars"] = cached_chars(book_id)
+        self.update(book_id, **fields)
+
+    def needs_details(self) -> list[int]:
+        with self.lock:
+            return [row[0] for row in self.conn.execute(
+                "SELECT id FROM books WHERE IFNULL(details, 0) < ?", (DETAILS_VERSION,))]
 
     # ---- changes ------------------------------------------------------------
     def add(self, path: str) -> int | None:
@@ -98,6 +140,10 @@ class Library:
             cpath = save_cover(book_id, cover)
             if cpath:
                 self.update(book_id, cover=cpath)
+            try:
+                self.fill_details(book_id)
+            except Exception:
+                pass
         return book_id
 
     def update(self, book_id: int, **fields) -> None:
