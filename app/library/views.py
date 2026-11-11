@@ -19,9 +19,20 @@ def fmt_index(idx) -> str:
     return f"{idx:g}"
 
 
+IGNORE_ARTICLES = False       # library-catalogue style "The Hobbit" under H (setting "sort_ignore_articles")
+
+
+def set_ignore_articles(on: bool) -> None:
+    global IGNORE_ARTICLES
+    IGNORE_ARTICLES = bool(on)
+
+
 def sort_title(t: str) -> str:
+    """Sort key: as written ("The Beginning..." under T), or without a leading The / A / An when
+    IGNORE_ARTICLES is on; numbers sort naturally."""
     t = (t or "").lower().strip()
-    t = re.sub(r"^(the|a|an)\s+", "", t)
+    if IGNORE_ARTICLES:
+        t = re.sub(r"^(the|a|an)\s+", "", t)
     # natural numbers: "vol. 2" before "vol. 10"
     return re.sub(r"\d+(\.\d+)?", lambda m: f"{float(m.group()):012.3f}", t)
 
@@ -110,7 +121,7 @@ def author_groups(rows: list[dict]) -> list[tuple[str, list[dict]]]:
         for a in authors_of(r):
             groups.setdefault(a, []).append(r)
     out = [(a, apply_sort(books, "Series")) for a, books in groups.items()]
-    out.sort(key=lambda g: g[0].lower())
+    out.sort(key=lambda g: sort_title(g[0]))
     return out
 
 

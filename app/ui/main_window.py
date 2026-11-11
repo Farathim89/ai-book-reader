@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         from . import shelf as shelf_mod
         shelf_mod.set_shelf_style(settings.get("shelf_style", "Walnut"))
         shelf_mod.SHOW_TITLES = bool(settings.get("show_titles", False))
+        views.set_ignore_articles(settings.get("sort_ignore_articles", False))
 
         self.setWindowTitle(APP_NAME)
         icon = resource_dir() / "assets" / "icon.png"
@@ -1770,6 +1771,7 @@ class MainWindow(QMainWindow):
         theme.apply_theme(QApplication.instance(), self.settings.get("theme", "Audiobookshelf"))
         shelf_mod.set_shelf_style(self.settings.get("shelf_style", "Walnut"))
         shelf_mod.SHOW_TITLES = bool(self.settings.get("show_titles", False))
+        views.set_ignore_articles(self.settings.get("sort_ignore_articles", False))
         for p in (self.library_page, self.series_page, self.series_books_page, self.authors_page,
                   self.author_books_page):
             p.shelf.show_titles = shelf_mod.SHOW_TITLES

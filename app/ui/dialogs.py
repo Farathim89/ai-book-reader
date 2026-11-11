@@ -637,9 +637,13 @@ class SettingsDialog(QDialog):
         self.shelf_box.setCurrentText(settings.get("shelf_style", "Walnut"))
         self.titles = QCheckBox("Show titles on the covers")
         self.titles.setChecked(bool(settings.get("show_titles", False)))
+        self.articles = QCheckBox("Ignore “The”, “A” and “An” at the start of titles when "
+                                  "sorting (“The Hobbit” under H)")
+        self.articles.setChecked(bool(settings.get("sort_ignore_articles", False)))
         f.addRow("Colour theme", self.theme_box)
         f.addRow("Bookshelf", self.shelf_box)
         f.addRow("", self.titles)
+        f.addRow("Sorting", self.articles)
         f.addRow("", muted("Plain uses the colours of the theme. Changes apply right away."))
         tabs.addTab(w, "Appearance")
 
@@ -821,6 +825,7 @@ class SettingsDialog(QDialog):
         s["theme"] = self.theme_box.currentText()
         s["shelf_style"] = self.shelf_box.currentText()
         s["show_titles"] = self.titles.isChecked()
+        s["sort_ignore_articles"] = self.articles.isChecked()
         self.old_libraries = [dict(lib, folders=list(lib["folders"])) for lib in (s.get("libraries") or [])]
         s["libraries"] = self.libraries_tab.result()
         s["library_folders"] = [f for lib in s["libraries"] for f in lib["folders"]]

@@ -37,6 +37,23 @@ def test_voice_popup_lists_columns_and_picks(monkeypatch):
     assert picked == ["kokoro:am_adam"] and combo.currentData() == "kokoro:am_adam"
 
 
+def test_titles_sort_as_written_or_without_articles(monkeypatch):
+    from app.library import views
+    rows = [{"title": t, "series": t} for t in ("The Beginning After the End", "Bungo Stray Dogs", "A Silent Voice",
+                                                 "Tearmoon Empire", "86--EIGHTY-SIX")]
+    titles = lambda rs: [r["title"] for r in rs]  # noqa: E731
+    monkeypatch.setattr(views, "IGNORE_ARTICLES", False)
+    assert titles(views.apply_sort(rows, "Title")) == ["86--EIGHTY-SIX", "A Silent Voice", "Bungo Stray Dogs",
+                                                      "Tearmoon Empire", "The Beginning After the End"]
+    assert [g[0] for g in views.series_groups(rows)][-1] == "The Beginning After the End"
+    views.set_ignore_articles(True)
+    try:
+        assert titles(views.apply_sort(rows, "Title")) == ["86--EIGHTY-SIX", "The Beginning After the End",
+                                                          "Bungo Stray Dogs", "A Silent Voice", "Tearmoon Empire"]
+    finally:
+        views.set_ignore_articles(False)
+
+
 def test_covers_are_found_after_the_app_folder_moved(tmp_path, monkeypatch):
     monkeypatch.setenv("ABR_DATA_DIR", str(tmp_path / "data"))
     from app.library.db import Library

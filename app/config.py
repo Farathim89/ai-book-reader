@@ -27,6 +27,7 @@ DEFAULTS: dict[str, Any] = {
     "text_model": "qwen2.5:14b",
     "vision_model": "qwen2.5vl:7b",
     "library_sort": "recent",
+    "sort_ignore_articles": False,  # True: "The Hobbit" sorts under H (like Audiobookshelf's prefix option)
     "notify_tasks": True,
     "check_updates": True,
     "auto_update": False,           # download updates in the background, install them when the app closes
