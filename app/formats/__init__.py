@@ -94,4 +94,29 @@ def read_meta(path: str) -> tuple[str, str, bytes | None]:
         t, a = title_author_from_name(path)
         c = None
     ft, fa = title_author_from_name(path)
+    cal = calibre_meta(path)
+    if cal:   # a Calibre library folder: its metadata is what the user curated
+        t, a, c = cal[0] or t, cal[1] or a, c or cal[2]
     return t or ft, a or fa, c
+
+
+def calibre_meta(path: str) -> tuple[str, str, bytes | None] | None:
+    """Title, authors and cover from a Calibre library book folder (metadata.opf + cover.jpg)."""
+    folder = Path(path).parent
+    opf = folder / "metadata.opf"
+    if not opf.is_file():
+        return None
+    try:
+        from lxml import etree
+        root = etree.parse(str(opf), etree.XMLParser(recover=True, resolve_entities=False, no_network=True)).getroot()
+        dc = "{http://purl.org/dc/elements/1.1/}"
+        title = (root.findtext(f".//{dc}title") or "").strip()
+        authors = [e.text.strip() for e in root.iter(f"{dc}creator") if e.text and e.text.strip()]
+    except Exception:
+        return None
+    cover = None
+    for name in ("cover.jpg", "cover.jpeg", "cover.png"):
+        if (folder / name).is_file():
+            cover = (folder / name).read_bytes()
+            break
+    return title, ", ".join(dict.fromkeys(authors)), cover

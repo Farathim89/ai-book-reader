@@ -224,7 +224,8 @@ def load_epub(path: str, fmt: str = "epub") -> Book:
         if not ch.title:
             head = next((p.text for p in ch.paragraphs[:3] if p.kind == "h"), None)
             ch.title = (head or (ch.paragraphs[0].text if ch.paragraphs else ""))[:70] or f"Section {i + 1}"
-    chapters = [c for c in chapters if c.paragraphs]
+    from .chapters import refine_chapters
+    chapters = refine_chapters([c for c in chapters if c.paragraphs])
     book = Book(path=path, fmt=fmt, title=ep.title() or "", author=ep.author(), chapters=chapters)
     book.cover = ep.cover()
     return book

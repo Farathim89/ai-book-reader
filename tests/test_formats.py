@@ -20,6 +20,39 @@ def test_sentence_split_abbrev_and_initials():
     assert "Mr." in sents(t)[0] and "Smith" in sents(t)[0]
 
 
+def test_sentence_split_dotted_initials():
+    assert sents("Written by J.K. Rowling. The end.") == ["Written by J.K. Rowling.", "The end."]
+
+
+def test_refine_chapters_splits_long_single_chapter():
+    from app.formats.chapters import refine_chapters
+    from app.formats.model import Chapter, Paragraph
+    body = ["Word " * 60 + "end."] * 120
+    paras = [Paragraph("Contents"), Paragraph("1. What Torren Saw ..........  5")]
+    for n in range(1, 4):
+        paras += [Paragraph(f"CHAPTER {n} - Title {n}")] + [Paragraph(t) for t in body]
+    out = refine_chapters([Chapter("Book", paras)])
+    assert [c.title for c in out] == ["Book – CHAPTER 1 - Title 1", "CHAPTER 2 - Title 2", "CHAPTER 3 - Title 3"] \
+        or [c.title for c in out][-3:] == ["CHAPTER 1 - Title 1", "CHAPTER 2 - Title 2", "CHAPTER 3 - Title 3"]
+    # no headings at all -> ~5000-word parts
+    out = refine_chapters([Chapter("Book", [Paragraph(t) for t in body * 3])])
+    assert len(out) >= 4 and out[0].title == "Book – part 1"
+
+
+def test_calibre_metadata(books, tmp_path):
+    import shutil
+    from app.formats import read_meta
+    d = tmp_path / "Calibre Author" / "Some Book (12)"
+    d.mkdir(parents=True)
+    p = shutil.copy(books["pdf"], d / "Some Book - Calibre Author.pdf")
+    (d / "metadata.opf").write_text(
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf"><metadata '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Real Title</dc:title>'
+        "<dc:creator>Real Author</dc:creator></metadata></package>", encoding="utf-8")
+    t, a, c = read_meta(str(p))
+    assert (t, a) == ("Real Title", "Real Author") and c
+
+
 def test_sentence_split_dialogue():
     t = "“Stop!” he shouted. “Why?” She ran."
     assert sents(t) == ["“Stop!” he shouted.", "“Why?”", "She ran."]

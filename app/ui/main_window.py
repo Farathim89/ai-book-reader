@@ -673,7 +673,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("Read pages")
         box.setIcon(QMessageBox.Information)
-        detail = ("The local vision model will read them (about 5–15 seconds per page)." if vision else
+        detail = ("The local vision model will read them (about 3 seconds per page, once per book)." if vision else
                   "Without a vision model the basic built-in OCR is used: fast, but it can miss words or get the "
                   "bubble order wrong. For good results download a vision model first (about 6 GB, one time).")
         box.setText(what + "\n\n" + detail)

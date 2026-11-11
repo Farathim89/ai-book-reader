@@ -131,10 +131,30 @@ class Library:
             self.conn.close()
 
 
+FORMAT_PREFERENCE = ["epub", "azw3", "mobi", "fb2", "docx", "pdf", "rtf", "txt", "cbz"]
+
+
+def _stem(name: str) -> str:
+    low = name.lower()
+    for ext in (".fb2.zip",):
+        if low.endswith(ext):
+            return low[: -len(ext)]
+    return os.path.splitext(low)[0]
+
+
 def scan_folder(folder: str):
-    """Yield supported book files under ``folder``."""
+    """Yield supported book files under ``folder``. When a folder holds the same book in several
+    formats (e.g. a Calibre library: book.epub + book.mobi + book.pdf) only the best one is used."""
     for root, dirs, files in os.walk(folder):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
+        best: dict[str, tuple[int, str]] = {}
         for f in files:
-            if detect_format(f):
-                yield os.path.join(root, f)
+            fmt = detect_format(f)
+            if not fmt:
+                continue
+            rank = FORMAT_PREFERENCE.index(fmt) if fmt in FORMAT_PREFERENCE else 99
+            key = _stem(f)
+            if key not in best or rank < best[key][0]:
+                best[key] = (rank, f)
+        for _, f in sorted(best.values(), key=lambda x: x[1].lower()):
+            yield os.path.join(root, f)

@@ -85,6 +85,24 @@ def test_match_boxes_and_spacing():
     assert not _is_speech("13") and not _is_speech("回") and _is_speech("WH-")
 
 
+def test_vlm_bubbles_order_ids_and_safety_net():
+    from PIL import Image
+    from app.ai.ocr import PageReader
+
+    class FakeOllama:
+        def chat_json(self, model, system, user, schema=None, images=None, **kw):
+            assert "1: HELLO" in user and images
+            # model reorders, fixes text, skips the SFX (3) - and forgets balloon 2
+            return {"bubbles": [{"id": 4, "text": "Bye now."}, {"id": 1, "text": "Hello."}, {"id": 9, "text": "x"}]}
+
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 400), "white").save(buf, "PNG")
+    groups = [([10, 10, 100, 40], "HELLO"), ([10, 60, 200, 90], "WHERE ARE YOU GOING?"),
+              ([300, 10, 340, 30], "BAM"), ([10, 300, 100, 330], "BYE NOW.")]
+    out = PageReader(FakeOllama(), "m")._vlm_bubbles(buf.getvalue(), groups, rtl=False)
+    assert out == [(3, "Bye now."), (0, "Hello."), (1, "WHERE ARE YOU GOING?")]
+
+
 def test_lines_to_paragraphs():
     lines = [([50, 100, 500, 120], "The first para-"), ([50, 124, 500, 144], "graph goes on."),
              ([80, 170, 500, 190], "Second paragraph.")]
@@ -115,6 +133,15 @@ def test_library_db(tmp_path, monkeypatch):
     b2 = store.open_book(bid, str(p))      # from the parse cache
     assert b1.unit_count() == b2.unit_count() and b2.unit_text(4) == b1.unit_text(4)
     lib.close()
+
+
+def test_scan_folder_prefers_one_format_per_book(tmp_path):
+    from app.library.db import scan_folder
+    d = tmp_path / "Author" / "Book (1)"
+    d.mkdir(parents=True)
+    for name in ("Book.pdf", "Book.mobi", "Book.epub", "Book.azw3", "Other.txt", "cover.jpg", "metadata.opf"):
+        (d / name).write_bytes(b"x")
+    assert sorted(os.path.basename(p) for p in scan_folder(str(tmp_path))) == ["Book.epub", "Other.txt"]
 
 
 def make_scanned_pdf(path):

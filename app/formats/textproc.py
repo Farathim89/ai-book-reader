@@ -46,6 +46,8 @@ def split_sentences(text: str) -> list[tuple[int, int]]:
                     continue
                 if len(word) == 1 and wm.group(1).isupper():   # initials: "J. R. R. Tolkien"
                     continue
+                if re.fullmatch(r"(?:[A-Za-z]\.)+[A-Za-z]", wm.group(1)):   # "J.K. Rowling", "U.S.A."
+                    continue
         end = m.end(2)
         if end - start > 1:
             spans.append((start, end))

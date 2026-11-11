@@ -13,7 +13,7 @@ from pathlib import Path
 from ..formats import Book, load_book, parse_book
 from ..paths import sub
 
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 
 
 def book_dir(book_id: int) -> Path:

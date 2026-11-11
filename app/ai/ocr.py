@@ -142,6 +142,13 @@ def _is_speech(t: str) -> bool:
     return latin / len(letters) > 0.7
 
 
+def _looks_like_dialogue(t: str) -> bool:
+    if not _is_speech(t):
+        return False
+    words = re.findall(r"[A-Za-z']+", t)
+    return len(words) >= 4 or (len(words) >= 2 and bool(re.search(r"[.!?…]\s*$", t.strip())))
+
+
 def _key(t: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", t.lower())
 
@@ -169,15 +176,17 @@ def match_boxes(texts: list[str], groups: list[tuple[list[float], str]]) -> list
 
 
 COMIC_PROMPT = (
-    "This is a comic book page. Transcribe the text of every speech balloon, thought balloon and caption box "
-    "in the order a reader reads them: panel by panel, {order}, top to bottom. "
-    "Skip sound effects, page numbers, logos and credits. Write the text in normal sentence case "
-    "(not ALL CAPS) and join the lines of one balloon into one string. "
-    'Answer with JSON: {{"bubbles": [{{"text": "..."}}]}}'
+    "This is a comic book page. Every piece of text on it is marked with a red box and a red number.\n"
+    "The OCR text found in each box (it can contain mistakes):\n{regions}\n\n"
+    "List the boxes that are speech balloons, thought balloons or caption boxes, in the order a reader "
+    "reads them: panel by panel, {order}, top to bottom. Leave out boxes that are sound effects, page "
+    "numbers, logos or untranslated text. For each box give its number and its correct text, written in "
+    "normal sentence case (not ALL CAPS), as one line.\n"
+    'Answer with JSON: {{"bubbles": [{{"id": 3, "text": "..."}}, ...]}}'
 )
 COMIC_SCHEMA = {"type": "object", "properties": {"bubbles": {"type": "array", "items": {
-    "type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}},
-    "required": ["bubbles"]}
+    "type": "object", "properties": {"id": {"type": "integer"}, "text": {"type": "string"}},
+    "required": ["id", "text"]}}}, "required": ["bubbles"]}
 SCAN_PROMPT = (
     "This is a scanned page of a book. Transcribe all of the body text exactly, paragraph by paragraph. "
     "Skip running headers, page numbers and footnote markers. Join hyphenated line breaks. "
@@ -185,6 +194,33 @@ SCAN_PROMPT = (
 )
 SCAN_SCHEMA = {"type": "object", "properties": {"paragraphs": {"type": "array", "items": {"type": "string"}}},
                "required": ["paragraphs"]}
+
+
+def _marked_image(img_bytes: bytes, boxes: list[list[float]], max_side: int = 1600) -> bytes:
+    """The page with a red numbered box around every text region."""
+    from PIL import ImageDraw, ImageFont
+    im = _image(img_bytes)
+    w, h = im.size
+    scale = min(1.0, max_side / max(w, h))
+    if scale < 1.0:
+        im = im.resize((int(w * scale), int(h * scale)))
+    d = ImageDraw.Draw(im)
+    size = max(18, int(im.size[1] / 45))
+    try:
+        font = ImageFont.truetype("arialbd.ttf", size)
+    except OSError:
+        font = ImageFont.load_default()
+    for k, b in enumerate(boxes):
+        x0, y0, x1, y1 = (v * scale for v in b)
+        d.rectangle([x0 - 4, y0 - 4, x1 + 4, y1 + 4], outline=(230, 0, 0), width=3)
+        label = str(k + 1)
+        tw = d.textlength(label, font=font)
+        lx, ly = max(0, x0 - 4), max(0, y0 - 4 - size - 6)
+        d.rectangle([lx, ly, lx + tw + 10, ly + size + 6], fill=(230, 0, 0))
+        d.text((lx + 5, ly + 2), label, fill="white", font=font)
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
 
 
 def _vlm_image(img_bytes: bytes, max_side: int = 1600) -> bytes:
@@ -204,21 +240,53 @@ class PageReader:
     def comic_page(self, img_bytes: bytes, rtl: bool = False) -> list[dict]:
         lines, w, h = detect_lines(img_bytes)
         groups = reading_order(group_bubbles(lines), rtl)
-        texts: list[str] | None = None
+        if not groups:
+            return []
         if self.vlm_ok:
             try:
-                order = "right to left (manga)" if rtl else "left to right"
-                res = self.ollama.chat_json(self.model, "You transcribe comics for an audiobook narrator.",
-                                            COMIC_PROMPT.format(order=order), schema=COMIC_SCHEMA,
-                                            images=[_vlm_image(img_bytes)], num_ctx=8192)
-                texts = [str(b.get("text", "")).strip() for b in res.get("bubbles", []) if isinstance(b, dict)]
-                texts = [t for t in texts if t]
+                bubbles = self._vlm_bubbles(img_bytes, groups, rtl)
+                if bubbles:
+                    return [{"text": t, "box": _norm_box(groups[i][0], w, h)} for i, t in bubbles]
             except OllamaError:
-                texts = None
-        if texts is None:   # RapidOCR only
-            return [{"text": fix_spacing(t), "box": _norm_box(b, w, h)} for b, t in groups if _is_speech(t)]
-        boxes = match_boxes(texts, groups)
-        return [{"text": t, "box": _norm_box(b, w, h) if b else None} for t, b in zip(texts, boxes)]
+                pass
+        # RapidOCR only
+        return [{"text": fix_spacing(t), "box": _norm_box(b, w, h)} for b, t in groups if _is_speech(t)]
+
+    def _vlm_bubbles(self, img_bytes: bytes, groups, rtl: bool) -> list[tuple[int, str]]:
+        """Set-of-marks prompting: numbered boxes on the page, the model picks order + fixes text."""
+        marked = _marked_image(img_bytes, [g[0] for g in groups])
+        regions = "\n".join(f"{i + 1}: {fix_spacing(t)}" for i, (_, t) in enumerate(groups))
+        order = "right to left (manga)" if rtl else "left to right"
+        res = self.ollama.chat_json(self.model, "You read comics aloud for an audiobook narrator.",
+                                    COMIC_PROMPT.format(regions=regions, order=order), schema=COMIC_SCHEMA,
+                                    images=[marked], num_ctx=8192)
+        out: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        for b in res.get("bubbles", []) or []:
+            if not isinstance(b, dict):
+                continue
+            try:
+                i = int(str(b.get("id", "")).strip().lstrip("#")) - 1
+            except ValueError:
+                continue
+            text = " ".join(str(b.get("text", "")).split())
+            if 0 <= i < len(groups) and i not in seen and text:
+                seen.add(i)
+                out.append((i, text))
+        if not out:
+            return out
+        # safety net: the model sometimes drops a real balloon. Put back OCR regions that clearly are
+        # sentences (several words or sentence punctuation), at their position in the layout order.
+        for k, (_, t) in enumerate(groups):
+            if k in seen or not _looks_like_dialogue(t):
+                continue
+            pos = 0
+            for n, (i, _) in enumerate(out):
+                if i < k:
+                    pos = n + 1
+            out.insert(pos, (k, fix_spacing(t)))
+            seen.add(k)
+        return out
 
     def scan_page(self, img_bytes: bytes) -> list[str]:
         if self.vlm_ok:
