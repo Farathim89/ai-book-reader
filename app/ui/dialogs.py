@@ -635,14 +635,16 @@ class SettingsDialog(QDialog):
         self.shelf_box = QComboBox()
         self.shelf_box.addItems(list(shelf_mod.SHELF_STYLES))
         self.shelf_box.setCurrentText(settings.get("shelf_style", "Walnut"))
-        self.titles = QCheckBox("Show titles on the covers")
-        self.titles.setChecked(bool(settings.get("show_titles", False)))
+        self.titles = QComboBox()
+        for key, label in shelf_mod.TITLE_MODES.items():
+            self.titles.addItem(label, key)
+        self.titles.setCurrentIndex(max(0, self.titles.findData(settings.get("title_bar", "under"))))
         self.articles = QCheckBox("Ignore “The”, “A” and “An” at the start of titles when "
                                   "sorting (“The Hobbit” under H)")
         self.articles.setChecked(bool(settings.get("sort_ignore_articles", False)))
         f.addRow("Colour theme", self.theme_box)
         f.addRow("Bookshelf", self.shelf_box)
-        f.addRow("", self.titles)
+        f.addRow("Titles", self.titles)
         f.addRow("Sorting", self.articles)
         f.addRow("", muted("Plain uses the colours of the theme. Changes apply right away."))
         tabs.addTab(w, "Appearance")
@@ -824,7 +826,8 @@ class SettingsDialog(QDialog):
         s["notify_tasks"] = self.notify.isChecked()
         s["theme"] = self.theme_box.currentText()
         s["shelf_style"] = self.shelf_box.currentText()
-        s["show_titles"] = self.titles.isChecked()
+        s["title_bar"] = self.titles.currentData()
+        s["show_titles"] = self.titles.currentData() == "cover"
         s["sort_ignore_articles"] = self.articles.isChecked()
         self.old_libraries = [dict(lib, folders=list(lib["folders"])) for lib in (s.get("libraries") or [])]
         s["libraries"] = self.libraries_tab.result()

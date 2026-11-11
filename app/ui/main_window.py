@@ -76,7 +76,7 @@ class MainWindow(QMainWindow):
         L.libraries(settings)   # migrate old folder list
         from . import shelf as shelf_mod
         shelf_mod.set_shelf_style(settings.get("shelf_style", "Walnut"))
-        shelf_mod.SHOW_TITLES = bool(settings.get("show_titles", False))
+        shelf_mod.TITLE_MODE = settings.get("title_bar", "under")
         views.set_ignore_articles(settings.get("sort_ignore_articles", False))
 
         self.setWindowTitle(APP_NAME)
@@ -151,6 +151,39 @@ class MainWindow(QMainWindow):
         self._startup_timer.start()
         if self.settings.get("check_updates", True) and (updater.can_install() or os.environ.get("ABR_UPDATE_TEST")):
             QTimer.singleShot(8000, self._check_updates)
+        self.tv = None
+        if self.settings.get("tv_start"):
+            QTimer.singleShot(300, self.open_tv)
+
+    # =========================================================================== TV mode / looks
+    def open_tv(self) -> None:
+        """Full-screen couch layout (F10). The normal window hides until TV mode is left."""
+        if self.tv is not None:
+            return
+        from .tv_mode import TvWindow
+        self.search_popup.hide()
+        self.tv = TvWindow(self)
+        self.tv.exited.connect(self._tv_closed)
+        self.tv.start()
+        self.hide()
+
+    def _tv_closed(self) -> None:
+        self.tv = None
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.refresh_page(keep_scroll=True)
+
+    def show_looks(self) -> None:
+        from .looks import LooksPanel
+        LooksPanel(self, self.settings, self._looks_changed).show_under(self.looks_btn)
+
+    def _looks_changed(self, key: str, value: str) -> None:
+        self.settings[key] = value
+        if key == "title_bar":
+            self.settings["show_titles"] = value == "cover"
+        self.settings.save()
+        self._apply_appearance()
 
     # =========================================================================== startup
     def _warm_up(self) -> None:
@@ -249,6 +282,10 @@ class MainWindow(QMainWindow):
         bar.add(add)
         self.jobs_button = bar.add(JobsButton())
         self.jobs_button.clicked.connect(self._toggle_jobs)
+        self.looks_btn = bar.add(IconButton("brush", "Looks: colour theme, bookshelf and titles", 19))
+        self.looks_btn.clicked.connect(self.show_looks)
+        tv = bar.add(IconButton("tv", "TV mode (F10): full screen for the couch, works with a controller", 19))
+        tv.clicked.connect(self.open_tv)
         voices = bar.add(IconButton("mic", "Voices: preview, default narrator, voice cloning", 19))
         voices.clicked.connect(self.show_voices)
         sett = bar.add(IconButton("settings", "Settings", 19))
@@ -440,6 +477,7 @@ class MainWindow(QMainWindow):
         sc("Alt+Left", self.go_back)
         sc("Escape", self._escape)
         sc("Ctrl+F", lambda: (self.search.setFocus(), self.search.selectAll()))
+        sc("F10", self.open_tv)
 
     def _escape(self) -> None:
         if self.search_popup.isVisible():
@@ -1770,13 +1808,13 @@ class MainWindow(QMainWindow):
         from . import shelf as shelf_mod
         theme.apply_theme(QApplication.instance(), self.settings.get("theme", "Audiobookshelf"))
         shelf_mod.set_shelf_style(self.settings.get("shelf_style", "Walnut"))
-        shelf_mod.SHOW_TITLES = bool(self.settings.get("show_titles", False))
+        shelf_mod.TITLE_MODE = self.settings.get("title_bar", "under")
         views.set_ignore_articles(self.settings.get("sort_ignore_articles", False))
         for p in (self.library_page, self.series_page, self.series_books_page, self.authors_page,
                   self.author_books_page):
-            p.shelf.show_titles = shelf_mod.SHOW_TITLES
+            p.shelf.set_title_mode(shelf_mod.TITLE_MODE)
             p.shelf.viewport().update()
-        self.home_page.show_titles = shelf_mod.SHOW_TITLES
+        self.home_page.title_mode = shelf_mod.TITLE_MODE
         self._nav_icons()
         self._fill_library_combo()
         self.player_bar.restyle()

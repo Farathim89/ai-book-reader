@@ -132,7 +132,7 @@ class HomePage(QScrollArea):
         self.setWidget(self.inner)
         self.shelves: list[Shelf] = []
         self.cover_w = 120
-        self.show_titles = False
+        self.title_mode = "under"         # titles: off / cover / under (label on the shelf)
 
     def set_shelves(self, shelves: list[tuple[str, list[ShelfItem]]], empty_text: str = "") -> None:
         while self.vbox.count():
@@ -148,7 +148,7 @@ class HomePage(QScrollArea):
             return
         for title, items in shelves:
             s = Shelf(single_row=True)
-            s.show_titles = self.show_titles
+            s.title_mode = self.title_mode
             s.set_cover_width(self.cover_w)
             s.set_items(items)
             s.activated.connect(self.itemActivated)
@@ -162,6 +162,7 @@ class HomePage(QScrollArea):
             self.shelves.append(s)
         filler = Shelf()             # empty shelves below, like an ABS bookcase
         filler.empty_text = ""
+        filler.title_mode = self.title_mode
         filler.set_cover_width(self.cover_w)
         filler.setMinimumHeight(filler.row_h)
         filler.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

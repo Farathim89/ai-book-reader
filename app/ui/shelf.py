@@ -83,7 +83,9 @@ SHELF_STYLES: dict[str, tuple] = {
     "Plain": ("plain", None, None),
 }
 SHELF_STYLE = "Walnut"
-SHOW_TITLES = False
+SHOW_TITLES = False                 # kept for old callers: True = titles on the cover
+TITLE_MODES = {"off": "Off", "cover": "On the cover", "under": "Under the book (label on the shelf)"}
+TITLE_MODE = "under"                # "off" | "cover" | "under"
 
 
 def set_shelf_style(name: str) -> None:
@@ -129,8 +131,8 @@ def _plain(w: int, h: int, color: str, slab: bool) -> QPixmap:
     return _WOOD[key]
 
 
-def wall_pixmap() -> QPixmap:
-    kind, wall, _ = SHELF_STYLES[SHELF_STYLE]
+def wall_pixmap(style: str | None = None) -> QPixmap:
+    kind, wall, _ = SHELF_STYLES[style if style in SHELF_STYLES else SHELF_STYLE]
     if kind == "stone":
         return _stone(512, 512, wall, False, 5)
     if kind == "plain":
@@ -138,8 +140,8 @@ def wall_pixmap() -> QPixmap:
     return _wood(512, 512, wall, False, 7)
 
 
-def plank_pixmap() -> QPixmap:
-    kind, _, plank = SHELF_STYLES[SHELF_STYLE]
+def plank_pixmap(style: str | None = None) -> QPixmap:
+    kind, _, plank = SHELF_STYLES[style if style in SHELF_STYLES else SHELF_STYLE]
     if kind == "stone":
         return _stone(512, 64, plank, True, 9)
     if kind == "plain":
@@ -246,7 +248,7 @@ class Shelf(QAbstractScrollArea):
         self.single_row = single_row
         self.items: list[ShelfItem] = []
         self.cover_w = 120
-        self.show_titles = SHOW_TITLES
+        self.title_mode = TITLE_MODE
         self.empty_text = "Nothing here yet"
         self._hover = -1
         self._hover_play = False
@@ -283,8 +285,31 @@ class Shelf(QAbstractScrollArea):
         return max(22, int(self.cover_w * 0.22))
 
     @property
+    def show_titles(self) -> bool:            # old name: titles drawn on the cover
+        return self.title_mode == "cover"
+
+    @show_titles.setter
+    def show_titles(self, on: bool) -> None:
+        self.set_title_mode("cover" if on else "off")
+
+    def set_title_mode(self, mode: str) -> None:
+        self.title_mode = mode if mode in TITLE_MODES else "off"
+        self.set_cover_width(self.cover_w)             # the shelf edge grows / shrinks with the label
+
+    def _label_font(self) -> QFont:
+        f = QFont("Segoe UI")
+        f.setPixelSize(max(10, int(self.cover_w / 11)))
+        return f
+
+    @property
+    def label_h(self) -> int:
+        """Height of the title label under a book ("under" mode): two lines of text."""
+        return QFontMetrics(self._label_font()).height() * 2 + 10
+
+    @property
     def plank_h(self) -> int:
-        return max(16, min(30, int(self.cover_w * 0.17)))
+        base = max(16, min(30, int(self.cover_w * 0.17)))
+        return max(base, self.label_h + 12) if self.title_mode == "under" else base
 
     @property
     def top_pad(self) -> int:
@@ -452,8 +477,11 @@ class Shelf(QAbstractScrollArea):
                 frac = 1.0 if it.finished else min(1.0, it.progress)
                 p.fillRect(QRectF(bar.left(), bar.top(), bar.width() * frac, bar.height()),
                            QColor(theme.GREEN_HOVER if it.finished else theme.ORANGE))
-            if self.show_titles:
+            if self.title_mode == "cover":
                 self._paint_title_strip(p, it, r)
+        if self.title_mode == "under":
+            sub = it.subtitle if it.kind == "book" else f"{it.count} book{'s' if it.count != 1 else ''}"
+            self._paint_label(p, r, it.title, sub, hovered)
         if it.badge:
             _pill(p, r.left() + 5, r.top() + 5, it.badge, max(10, int(self.cover_w / 11)),
                   QColor(0, 0, 0, 175), QColor(255, 255, 255))
@@ -477,6 +505,33 @@ class Shelf(QAbstractScrollArea):
     def _play_rect(self, r: QRectF) -> QRectF:
         d = max(34, min(60, r.width() * 0.36))
         return QRectF(r.center().x() - d / 2, r.center().y() - d / 2, d, d)
+
+    def label_rect(self, r: QRectF) -> QRectF:
+        """The label plate on the shelf edge under a cover."""
+        top = r.bottom() - 3 + (self.plank_h - self.label_h) / 2
+        return QRectF(r.left(), top, r.width(), self.label_h)
+
+    def _paint_label(self, p: QPainter, r: QRectF, title: str, sub: str, hovered: bool) -> None:
+        plate = self.label_rect(r)
+        path = QPainterPath()
+        path.addRoundedRect(plate, 4, 4)
+        p.fillPath(path, QColor(0, 0, 0, 150 if not hovered else 190))
+        p.setPen(QPen(QColor(theme.YELLOW) if hovered else QColor(255, 235, 200, 45), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        f = self._label_font()
+        fm = QFontMetrics(f)
+        inner = plate.adjusted(6, 5, -6, -5)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(theme.YELLOW) if hovered else QColor("white"))
+        p.drawText(inner, Qt.AlignHCenter | Qt.AlignTop,
+                   QFontMetrics(f).elidedText(title or "", Qt.ElideRight, int(inner.width())))
+        if sub:
+            f.setBold(False)
+            p.setFont(f)
+            p.setPen(QColor(theme.MUTED))
+            p.drawText(inner, Qt.AlignHCenter | Qt.AlignBottom, fm.elidedText(sub, Qt.ElideRight, int(inner.width())))
 
     def _paint_title_strip(self, p: QPainter, it: ShelfItem, r: QRectF) -> None:
         f = QFont("Segoe UI")
@@ -514,7 +569,8 @@ class Shelf(QAbstractScrollArea):
             paint_cover(p, cr, covers[k], it.title)
             if k:
                 p.fillRect(cr, QColor(0, 0, 0, 70 + 30 * k))
-        self._name_strip(p, r, it.title, f"{it.count} book{'s' if it.count != 1 else ''}")
+        if self.title_mode != "under":           # the label under the book shows the name instead
+            self._name_strip(p, r, it.title, f"{it.count} book{'s' if it.count != 1 else ''}")
 
     def _paint_author(self, p: QPainter, it: ShelfItem, r: QRectF) -> None:
         hue = _hue(it.title)
@@ -541,7 +597,8 @@ class Shelf(QAbstractScrollArea):
         p.setFont(f)
         p.setPen(QColor(255, 255, 255, 230))
         p.drawText(circle, Qt.AlignCenter, initials)
-        self._name_strip(p, r, it.title, f"{it.count} book{'s' if it.count != 1 else ''}")
+        if self.title_mode != "under":
+            self._name_strip(p, r, it.title, f"{it.count} book{'s' if it.count != 1 else ''}")
 
     def _name_strip(self, p: QPainter, r: QRectF, name: str, sub: str) -> None:
         h = max(38, r.height() * 0.23)
@@ -563,7 +620,8 @@ class Shelf(QAbstractScrollArea):
     # ---- mouse ----------------------------------------------------------------
     def _index_at(self, pos) -> int:
         for i in self._visible_indexes():
-            if self.item_rect(i).contains(pos):
+            r = self.item_rect(i)
+            if r.contains(pos) or (self.title_mode == "under" and self.label_rect(r).contains(pos)):
                 return i
         return -1
 

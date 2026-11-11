@@ -33,7 +33,11 @@ DEFAULTS: dict[str, Any] = {
     "auto_update": False,           # download updates in the background, install them when the app closes
     "window_geometry": None,
     "window_state": None,
-    "settings_version": 2,
+    "tv_start": False,               # open TV mode when the app starts
+    "tv_saver_playing": 30,          # TV mode screen saver while a book plays (seconds, 0 = off)
+    "tv_saver_idle": 300,            # ... when nothing plays
+    "title_bar": "under",           # book titles: "off", "cover" (on the cover), "under" (label on the shelf)
+    "settings_version": 3,
 }
 
 # defaults of earlier versions: a stored value that still equals one was never changed by the user
@@ -50,14 +54,16 @@ class Settings:
             stored = None
         if isinstance(stored, dict):
             self.values.update(stored)
-            self._migrate(int(stored.get("settings_version") or 1))
+            self._migrate(int(stored.get("settings_version") or 1), stored)
 
-    def _migrate(self, version: int) -> None:
+    def _migrate(self, version: int, stored: dict) -> None:
         """Move untouched old defaults to the new ones (e.g. the 1.2.2 human-like pauses)."""
         for v in range(version, DEFAULTS["settings_version"]):
             for key, old in OLD_DEFAULTS.get(v, {}).items():
                 if self.values.get(key) == old:
                     self.values[key] = DEFAULTS[key]
+            if v == 2 and stored.get("show_titles"):          # 1.2.3: titles on the cover stay there
+                self.values["title_bar"] = "cover"
         self.values["settings_version"] = DEFAULTS["settings_version"]
 
     def __getitem__(self, key: str) -> Any:

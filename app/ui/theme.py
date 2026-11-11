@@ -65,6 +65,10 @@ I = {
 }
 
 
+I.update({"brush": "", "tv": "", "fullscreen": "", "keyboard": "",
+          "backspace": "", "gamepad": "", "exit": ""})
+
+
 def icon_font(size: int = 13) -> QFont:
     f = QFont(ICON_FONT)
     f.setPixelSize(size)
