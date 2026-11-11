@@ -49,6 +49,37 @@ def test_clone_quality_settings_and_engine_choice(long_recording, tmp_path, monk
     assert V.clone_settings(v.id)["model"] == "full"
 
 
+def test_edit_a_clone_keeps_its_id(long_recording, tmp_path, monkeypatch):
+    monkeypatch.setenv("ABR_DATA_DIR", str(tmp_path / "data"))
+    v = V.add_clone("Grandpa", "male", str(long_recording), start=0, seconds=20)
+    ref = V.clones_dir() / v.id.split(":")[1] / "ref.wav"
+    info = V.clone_info(v.id)
+    assert info["source"] == str(long_recording) and info["start"] == 0 and info["seconds"] == 20
+    # name / gender / quality only: the clip stays as it is
+    before = ref.read_bytes()
+    w = V.update_clone(v.id, "Grandpa Joe", "male", str(long_recording), 0, 20, model="turbo",
+                       expressiveness=0.7, recut=False)
+    assert w.id == v.id and ref.read_bytes() == before
+    assert V.find_voice(v.id).name == "Grandpa Joe"
+    assert V.clone_settings(v.id) == {"model": "turbo", "expressiveness": 0.7}
+    # a new start and length: the clip is cut again, from the 440 Hz half
+    V.update_clone(v.id, "Grandpa Joe", "male", str(long_recording), 35, 12)
+    clip, sr = sf.read(str(ref), dtype="float32")
+    assert abs(len(clip) / sr - 12) < 0.1 and abs(_pitch(clip, sr) - 440) < 5
+    assert V.clone_info(v.id)["start"] == 35 and V.clone_info(v.id)["seconds"] == 12
+    # a failed re-cut leaves the old clip in place
+    with pytest.raises(ValueError):
+        V.update_clone(v.id, "Grandpa Joe", "male", str(long_recording), 59, 12)
+    assert abs(sf.info(str(ref)).duration - 12) < 0.1
+    # voices made before 1.2.5 have no length saved: it is measured from the clip
+    meta = ref.parent / "voice.json"
+    meta.write_text('{"name": "Old", "gender": "female"}', encoding="utf-8")
+    assert V.clone_info(v.id)["seconds"] == 12 and V.clone_info(v.id)["start"] == 0
+    V.remove_clone(v.id)
+    with pytest.raises(ValueError, match="deleted"):
+        V.update_clone(v.id, "x", "male", str(long_recording), 0, 12, recut=False)
+
+
 def test_progress_is_reported_while_reading(long_recording, tmp_path, monkeypatch):
     if not V.ffmpeg_exe():
         pytest.skip("needs ffmpeg")

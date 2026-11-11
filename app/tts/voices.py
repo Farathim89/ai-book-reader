@@ -192,8 +192,26 @@ def add_clone(name: str, gender: str, source: str, start: float = 0.0, seconds: 
               progress=None, model: str = "full", expressiveness: float = DEFAULT_EXPRESSIVENESS) -> Voice:
     """Store a reference clip (trimmed, loudness-levelled 24 kHz mono WAV) for a cloned voice.
     progress(fraction, message) is called while it works (from this thread)."""
-    import soundfile as sf
     report = progress or (lambda f, msg: None)
+    clip = _cut_clip(source, start, seconds, report)
+    slug = slugify(name)
+    base, k = slug, 2
+    while (clones_dir() / slug).exists():
+        slug = f"{base}-{k}"
+        k += 1
+    d = clones_dir() / slug
+    d.mkdir(parents=True)
+    _write_clip(d, clip)
+    (d / "voice.json").write_text(json.dumps({"name": name, "gender": gender, "source": str(source),
+                                              "start": start, "seconds": seconds,
+                                              "model": model if model in CLONE_MODELS else "full",
+                                              "expressiveness": expressiveness}), encoding="utf-8")
+    report(1.0, "Done")
+    return Voice(f"clone:{slug}", name, gender, "chatterbox", "cloned voice")
+
+
+def _cut_clip(source: str, start: float, seconds: float, report) -> np.ndarray:
+    """The clip a cloned voice copies: `seconds` from `start`, peak-levelled."""
     report(0.0, "Reading the recording…")
     a = load_audio_any(source, 24000, start, seconds,
                        progress=lambda f: report(0.9 * f, f"Reading the recording… {int(f * seconds)} of "
@@ -203,20 +221,53 @@ def add_clone(name: str, gender: str, source: str, start: float = 0.0, seconds: 
         raise ValueError("The voice sample must have at least 6 seconds of speech (10-30 s works best). "
                          "Is 'Start at' past the end of the recording?")
     peak = float(np.max(np.abs(a))) or 1.0
-    a = (a / peak * 0.9).astype(np.float32)
-    slug = slugify(name)
-    base, k = slug, 2
-    while (clones_dir() / slug).exists():
-        slug = f"{base}-{k}"
-        k += 1
-    d = clones_dir() / slug
-    d.mkdir(parents=True)
-    sf.write(str(d / "ref.wav"), a, 24000, subtype="PCM_16")
-    (d / "voice.json").write_text(json.dumps({"name": name, "gender": gender, "source": str(source),
-                                              "start": start, "model": model if model in CLONE_MODELS else "full",
-                                              "expressiveness": expressiveness}), encoding="utf-8")
+    return (a / peak * 0.9).astype(np.float32)
+
+
+def _write_clip(folder: Path, clip: np.ndarray) -> None:
+    import soundfile as sf
+    tmp = folder / "ref.new.wav"
+    sf.write(str(tmp), clip, 24000, subtype="PCM_16")
+    tmp.replace(folder / "ref.wav")                 # the old clip stays until the new one is complete
+
+
+def clone_info(voice_id: str) -> dict:
+    """Everything the Edit window shows: name, gender, source, start, seconds, model, expressiveness."""
+    d = clones_dir() / voice_id.split(":", 1)[-1]
+    try:
+        m = json.loads((d / "voice.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        m = {}
+    seconds = m.get("seconds")
+    if not seconds:                                  # voices made before 1.2.5: measure the clip
+        try:
+            import soundfile as sf
+            seconds = round(sf.info(str(d / "ref.wav")).duration)
+        except Exception:  # noqa: BLE001
+            seconds = 20
+    return {"name": m.get("name", d.name), "gender": m.get("gender", "neutral"), "source": m.get("source", ""),
+            "start": float(m.get("start") or 0.0), "seconds": int(seconds), **clone_settings(voice_id)}
+
+
+def update_clone(voice_id: str, name: str, gender: str, source: str, start: float, seconds: float,
+                 progress=None, model: str = "full", expressiveness: float = DEFAULT_EXPRESSIVENESS,
+                 recut: bool = True) -> Voice:
+    """Change a cloned voice in place: same id, so books and characters that use it keep it.
+    With recut, the clip is cut again from `source` (a new recording or a new start / length)."""
+    report = progress or (lambda f, msg: None)
+    d = clones_dir() / voice_id.split(":", 1)[-1]
+    if not (d / "voice.json").exists():
+        raise ValueError("This voice was deleted.")
+    if recut:
+        _write_clip(d, _cut_clip(source, start, seconds, report))
+    m = json.loads((d / "voice.json").read_text(encoding="utf-8"))
+    m.update({"name": name, "gender": gender, "model": model if model in CLONE_MODELS else "full",
+              "expressiveness": expressiveness})
+    if recut:
+        m.update({"source": str(source), "start": start, "seconds": seconds})
+    (d / "voice.json").write_text(json.dumps(m), encoding="utf-8")
     report(1.0, "Done")
-    return Voice(f"clone:{slug}", name, gender, "chatterbox", "cloned voice")
+    return Voice(voice_id, name, gender, "chatterbox", "cloned voice")
 
 
 def remove_clone(voice_id: str) -> None:

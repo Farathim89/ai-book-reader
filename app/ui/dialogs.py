@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTableWidget,
@@ -131,9 +131,10 @@ class CloneDialog(QDialog):
     _done = Signal(object, str)          # (voice or None, error) from the worker thread
     _prog = Signal(float, str)           # (0..1, what it is doing) from the worker thread
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, voice_id: str | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Add a cloned voice")
+        self.voice_id = voice_id                 # editing an existing cloned voice (same id is kept)
+        self.setWindowTitle("Edit cloned voice" if voice_id else "Add a cloned voice")
         self.setMinimumWidth(480)
         lay = QVBoxLayout(self)
         info = QLabel("Pick a recording of one person speaking clearly, with no music or other voices. "
@@ -183,7 +184,8 @@ class CloneDialog(QDialog):
         lay.addWidget(self.bar)
         lay.addWidget(self.step)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText("Add voice")
+        self.ok_text = "Save" if voice_id else "Add voice"
+        bb.button(QDialogButtonBox.Ok).setText(self.ok_text)
         bb.button(QDialogButtonBox.Ok).setObjectName("Accent")
         bb.accepted.connect(self._accept)
         bb.rejected.connect(self.reject)
@@ -192,6 +194,31 @@ class CloneDialog(QDialog):
         self.voice: V.Voice | None = None
         self._done.connect(self._finished)
         self._prog.connect(self._on_progress)
+        self.orig = None
+        if voice_id:
+            info = V.clone_info(voice_id)
+            self.orig = (info["source"], float(info["start"]), int(info["seconds"]))
+            self.name.setText(info["name"])
+            self.gender.setCurrentText(info["gender"])
+            self.file.setText(info["source"])
+            self.start.setValue(info["start"])
+            self.length.setValue(max(6, min(60, info["seconds"])))
+            self.options.set_values(info["model"], info["expressiveness"])
+            import os
+            if info["source"] and not os.path.exists(info["source"]):
+                gone = muted("The original recording isn't there any more. The voice keeps its current clip; "
+                             "to cut a new one, pick a recording with Browse…")
+                gone.setWordWrap(True)
+                gone.setStyleSheet(f"color: {theme.YELLOW};")
+                lay.insertWidget(lay.indexOf(self.options) + 1, gone)
+
+    def _recut(self) -> bool:
+        """Editing: does the clip have to be cut again (other recording, start or length)?"""
+        if not self.orig:
+            return True
+        src, start, secs = self.orig
+        return (self.file.text() != src or abs(self.start.value() - start) > 0.01
+                or self.length.value() != secs)
 
     def _browse(self) -> None:
         f, _ = QFileDialog.getOpenFileName(self, "Voice recording", "",
@@ -206,10 +233,16 @@ class CloneDialog(QDialog):
         if not self.name.text().strip() or not self.file.text():
             QMessageBox.information(self, "Add voice", "Enter a name and choose a recording.")
             return
+        import os
         import threading
+        recut = self._recut()
+        if recut and not os.path.exists(self.file.text()):
+            QMessageBox.information(self, self.windowTitle(), "That recording isn't there any more. Pick it again "
+                                    "with Browse…, or put Start at and Use back to keep the current clip.")
+            return
         ok = self.bb.button(QDialogButtonBox.Ok)
         ok.setEnabled(False)
-        ok.setText("Adding…")
+        ok.setText("Saving…" if self.voice_id else "Adding…")
         self.bar.setValue(0)
         self.bar.show()
         self.step.setText("Starting…")
@@ -217,11 +250,16 @@ class CloneDialog(QDialog):
         args = (self.name.text().strip(), self.gender.currentText(), self.file.text(), self.start.value(),
                 self.length.value())
         model, ex = self.options.values()
+        prog = lambda f, m: self._prog.emit(f, m)  # noqa: E731
+        vid = self.voice_id
 
         def work():                     # off the window's thread: the window stays usable meanwhile
             try:
-                self._done.emit(V.add_clone(*args, progress=lambda f, m: self._prog.emit(f, m), model=model,
-                                            expressiveness=ex), "")
+                if vid:
+                    voice = V.update_clone(vid, *args, progress=prog, model=model, expressiveness=ex, recut=recut)
+                else:
+                    voice = V.add_clone(*args, progress=prog, model=model, expressiveness=ex)
+                self._done.emit(voice, "")
             except Exception as e:  # noqa: BLE001
                 self._done.emit(None, str(e))
         threading.Thread(target=work, daemon=True).start()
@@ -234,10 +272,10 @@ class CloneDialog(QDialog):
         if voice is None:
             ok = self.bb.button(QDialogButtonBox.Ok)
             ok.setEnabled(True)
-            ok.setText("Add voice")
+            ok.setText(self.ok_text)
             self.bar.hide()
             self.step.hide()
-            QMessageBox.warning(self, "Add voice", err or "Could not read the recording.")
+            QMessageBox.warning(self, self.windowTitle(), err or "Could not read the recording.")
             return
         self.voice = voice
         self.bar.setValue(100)
@@ -278,11 +316,16 @@ class VoicesDialog(QDialog):
         self.add_btn = QPushButton("Add cloned voice…")
         self.add_btn.setObjectName("Accent")
         self.add_btn.clicked.connect(self._add)
+        self.edit_btn = QPushButton("Edit…")
+        self.edit_btn.setToolTip("Change the name, gender, recording, start or length of this cloned voice. "
+                                 "Books and characters that use it keep it.")
+        self.edit_btn.clicked.connect(self._edit)
         self.del_btn = QPushButton("Delete")
         self.del_btn.setObjectName("Danger")
+        self.del_btn.setToolTip("Delete this cloned voice")
         self.del_btn.clicked.connect(self._delete)
         self.status = muted("")
-        for w in (self.play_btn, self.default_btn, self.del_btn):
+        for w in (self.play_btn, self.default_btn, self.edit_btn, self.del_btn):
             row.addWidget(w)
         row.addWidget(self.status, 1)
         row.addWidget(self.add_btn)
@@ -299,6 +342,8 @@ class VoicesDialog(QDialog):
         tts.listeners.append(self._news.emit)          # model download / loading progress
         self.list.itemDoubleClicked.connect(lambda _: self._preview())
         self.list.currentItemChanged.connect(self._sel)
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._menu)
         self.changed = False
         self._fill()
 
@@ -336,6 +381,7 @@ class VoicesDialog(QDialog):
             self.list.addItem(it)
             if v.id == (select or default):
                 self.list.setCurrentItem(it)
+                QTimer.singleShot(0, lambda it=it: self.list.scrollToItem(it, QListWidget.PositionAtCenter))
 
     def _cur(self) -> str | None:
         it = self.list.currentItem()
@@ -344,6 +390,7 @@ class VoicesDialog(QDialog):
     def _sel(self, *_):
         vid = self._cur() or ""
         self.del_btn.setEnabled(vid.startswith("clone:"))
+        self.edit_btn.setEnabled(vid.startswith("clone:"))
         self.clone_opts.setVisible(vid.startswith("clone:"))
         if vid.startswith("clone:"):
             cs = V.clone_settings(vid)
@@ -367,15 +414,50 @@ class VoicesDialog(QDialog):
             self._fill(d.voice.id)
             self.preview.speak(d.voice.id, self.sample.text() or PREVIEW_TEXT)
 
+    def _menu(self, pos) -> None:
+        it = self.list.itemAt(pos)
+        if not it:
+            return
+        self.list.setCurrentItem(it)
+        vid = it.data(Qt.UserRole) or ""
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        m.addAction("▶  Preview", self._preview)
+        m.addAction("Use as default narrator", self._make_default)
+        if vid.startswith("clone:"):
+            m.addSeparator()
+            m.addAction("Edit…  (name, recording, start, length)", self._edit)
+            m.addAction("Delete", self._delete)
+        m.exec(self.list.viewport().mapToGlobal(pos))
+
+    def _edit(self) -> None:
+        vid = self._cur() or ""
+        if not vid.startswith("clone:"):
+            return
+        d = CloneDialog(self, voice_id=vid)
+        if d.exec() and d.voice:
+            self.tts.chatterbox.forget(vid)            # the clip may be new: copy the voice again
+            self.tts.chatterbox_full.forget(vid)
+            self.changed = True
+            self._fill(vid)
+            self.preview.speak(vid, self.sample.text() or PREVIEW_TEXT)
+
     def _delete(self) -> None:
         vid = self._cur()
         if not vid or not vid.startswith("clone:"):
             return
         v = V.find_voice(vid)
-        if QMessageBox.question(self, "Delete voice", f"Delete the cloned voice “{v.name}”?") == QMessageBox.Yes:
+        default = self.settings["narrator_voice"] == vid
+        msg = (f"Delete the cloned voice “{v.name}”? This can't be undone.\n\n"
+               "Books and characters that use it go back to the default narrator"
+               + (" (it is the default now, so Heart takes over)." if default else "."))
+        if QMessageBox.question(self, "Delete voice", msg) == QMessageBox.Yes:
             V.remove_clone(vid)
             self.tts.chatterbox.forget(vid)
             self.tts.chatterbox_full.forget(vid)
+            if default:
+                self.settings["narrator_voice"] = V.DEFAULT_VOICE
+                self.settings.save()
             self.changed = True
             self._fill()
 
