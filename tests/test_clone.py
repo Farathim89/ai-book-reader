@@ -29,6 +29,26 @@ def test_only_the_chosen_part_is_read(long_recording):
     assert len(V.load_audio_any(str(long_recording), 24000, start=999, seconds=10)) == 0
 
 
+def test_clone_quality_settings_and_engine_choice(long_recording, tmp_path, monkeypatch):
+    monkeypatch.setenv("ABR_DATA_DIR", str(tmp_path / "data"))
+    from app.tts.engines import ChatterboxEngine, ChatterboxFullEngine, cfg_for
+    from app.tts.service import TTSService
+    v = V.add_clone("Narrator", "female", str(long_recording), start=0, seconds=12)
+    assert V.clone_settings(v.id) == {"model": "full", "expressiveness": 0.5}     # best quality by default
+    tts = TTSService()
+    assert isinstance(tts.engine_for(v.id), ChatterboxFullEngine)
+    key_full = tts._gain_key(v.id)
+    V.set_clone_settings(v.id, model="turbo", expressiveness=3)                   # out of range: clamped
+    assert V.clone_settings(v.id) == {"model": "turbo", "expressiveness": 1.0}
+    assert isinstance(tts.engine_for(v.id), ChatterboxEngine)
+    assert tts._gain_key(v.id) != key_full                                         # loudness measured again
+    assert isinstance(tts.engine_for("chatterbox:default"), ChatterboxEngine)    # the built-in voice stays fast
+    assert cfg_for(0.5) == 0.5 and cfg_for(0.9) == pytest.approx(0.3) and cfg_for(0.25) == 0.5
+    old = V.clones_dir() / v.id.split(":")[1] / "voice.json"                     # clones made before 1.2.4
+    old.write_text('{"name": "Narrator", "gender": "female"}', encoding="utf-8")
+    assert V.clone_settings(v.id)["model"] == "full"
+
+
 def test_progress_is_reported_while_reading(long_recording, tmp_path, monkeypatch):
     if not V.ffmpeg_exe():
         pytest.skip("needs ffmpeg")

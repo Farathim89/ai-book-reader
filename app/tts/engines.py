@@ -142,7 +142,7 @@ class ChatterboxEngine:
     def forget(self, key: str) -> None:
         self._conds.pop(key, None)
 
-    def synth(self, text: str, key: str, ref_path: str | None) -> np.ndarray:
+    def synth(self, text: str, key: str, ref_path: str | None, expressiveness: float = 0.5) -> np.ndarray:
         import contextlib
         import io
         import torch
@@ -156,4 +156,125 @@ class ChatterboxEngine:
         m.conds = self._conds[key]
         with torch.inference_mode(), contextlib.redirect_stdout(io.StringIO()):
             wav = m.generate(text)
+        return wav.squeeze(0).cpu().numpy().astype(np.float32)
+
+
+FULL_REPO = "ResembleAI/chatterbox"
+FULL_FILES = ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]
+
+
+def cfg_for(expressiveness: float) -> float:
+    """More expressive = a little less 'guidance' (Resemble's advice: exaggeration up, cfg down)."""
+    return max(0.3, min(0.5, 0.5 - (expressiveness - 0.5) * 0.5))
+
+
+class ChatterboxFullEngine:
+    """The full Chatterbox model for cloned voices: closest to the recording (same-voice score 0.97
+    against 0.92 for Turbo on a real narrator), with an expressiveness control; ~1.8x real time on
+    an RTX 5070 Ti. Downloaded on first use (3.2 GB), with progress through .notify(text)."""
+    name = "chatterbox-full"
+    max_chars = 300
+
+    def __init__(self):
+        self.model = None
+        self._conds: dict[str, object] = {}
+        self._load_lock = threading.Lock()
+        self.notify = lambda text: None
+
+    @property
+    def loaded(self) -> bool:
+        return self.model is not None
+
+    @staticmethod
+    def downloaded() -> bool:
+        try:
+            from huggingface_hub import try_to_load_from_cache
+        except ImportError:
+            return False
+        return all(isinstance(try_to_load_from_cache(FULL_REPO, f), str) for f in FULL_FILES)
+
+    def _download(self) -> None:
+        from pathlib import Path
+
+        from huggingface_hub import HfApi, constants, hf_hub_download, try_to_load_from_cache
+        sizes = {s.rfilename: s.size or 0 for s in HfApi().model_info(FULL_REPO, files_metadata=True).siblings
+                 if s.rfilename in FULL_FILES}
+        total = sum(sizes.values()) or 1
+        blobs = Path(constants.HF_HUB_CACHE) / "models--ResembleAI--chatterbox" / "blobs"
+        done = 0
+        shown = 0                                     # never let the percentage go backwards
+        old = constants.HF_HUB_DISABLE_XET
+        constants.HF_HUB_DISABLE_XET = True          # plain download: its .incomplete file shows the progress
+        try:
+            for f in FULL_FILES:
+                if not isinstance(try_to_load_from_cache(FULL_REPO, f), str):
+                    errors: list[Exception] = []
+
+                    def get(f=f):
+                        try:
+                            hf_hub_download(FULL_REPO, f)
+                        except Exception as e:  # noqa: BLE001
+                            errors.append(e)
+                    t = threading.Thread(target=get, daemon=True)
+                    t.start()
+                    while t.is_alive():
+                        try:
+                            part = sum(p.stat().st_size for p in blobs.glob("*.incomplete")) if blobs.exists() else 0
+                        except OSError:                       # a part file finished while we looked
+                            part = 0
+                        part = min(part, sizes.get(f, 0))     # one file at a time: never count it twice
+                        shown = max(shown, min(99, int(100 * (done + part) / total)))
+                        self.notify(f"Downloading the high-quality voice model (once): {shown}% of "
+                                    f"{total / 1e9:.1f} GB")
+                        t.join(0.5)
+                    if errors:
+                        raise errors[0]
+                done += sizes.get(f, 0)
+        finally:
+            constants.HF_HUB_DISABLE_XET = old
+
+    def load(self) -> None:
+        with self._load_lock:
+            if self.model is not None:
+                return
+            warnings.filterwarnings("ignore")
+            logging.getLogger("chatterbox").setLevel(logging.ERROR)
+            _patch_chatterbox()
+            if not self.downloaded():
+                self._download()
+            self.notify("Loading the high-quality voice model…")
+            from chatterbox.tts import ChatterboxTTS
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.model = offline_first(lambda: ChatterboxTTS.from_pretrained(device=_device()))
+            self.notify("")
+
+    def unload(self) -> None:
+        with self._load_lock:
+            self.model = None
+            self._conds.clear()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    def forget(self, key: str) -> None:
+        for k in [k for k in self._conds if k.split("|")[0] == key]:
+            self._conds.pop(k, None)
+
+    def synth(self, text: str, key: str, ref_path: str | None, expressiveness: float = 0.5) -> np.ndarray:
+        import contextlib
+        import io
+        import torch
+        m = self.model
+        ck = f"{key}|{expressiveness:.2f}"
+        if ck not in self._conds:
+            if ref_path:
+                m.prepare_conditionals(ref_path, exaggeration=expressiveness)
+            self._conds[ck] = m.conds
+        m.conds = self._conds[ck]
+        with torch.inference_mode(), contextlib.redirect_stdout(io.StringIO()):
+            wav = m.generate(text, exaggeration=expressiveness, cfg_weight=cfg_for(expressiveness))
         return wav.squeeze(0).cpu().numpy().astype(np.float32)

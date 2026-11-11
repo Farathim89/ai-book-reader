@@ -13,8 +13,8 @@ import threading
 import numpy as np
 
 from ..formats.textproc import has_speech, speech_text, split_for_tts
-from .engines import SR, ChatterboxEngine, KokoroEngine
-from .voices import CHATTERBOX_DEFAULT, DEFAULT_VOICE, clone_ref_path, ffmpeg_exe, find_voice
+from .engines import SR, ChatterboxEngine, ChatterboxFullEngine, KokoroEngine
+from .voices import CHATTERBOX_DEFAULT, DEFAULT_VOICE, clone_ref_path, clone_settings, ffmpeg_exe, find_voice
 
 NATURAL_PACE = 0.9          # 1.0x = an audiobook narrator's pace (the raw voices speak ~10% faster)
 TARGET_LUFS = -19.0         # audiobook loudness (ACX / Audible range), the same for every voice
@@ -93,15 +93,26 @@ class TTSService:
     def __init__(self):
         self.kokoro = KokoroEngine()
         self.chatterbox = ChatterboxEngine()
+        self.chatterbox_full = ChatterboxFullEngine()
+        self.chatterbox_full.notify = self._notify
         self.gpu = threading.RLock()
         self._gains: dict[str, float] | None = None
+        self.listeners: list = []           # callables(text): download / loading news for the windows
+
+    def _notify(self, text: str) -> None:
+        for fn in list(self.listeners):
+            try:
+                fn(text)
+            except Exception:  # noqa: BLE001 - a closed window must not stop the voice
+                pass
 
     # ---- loudness -------------------------------------------------------------
     def _gain_key(self, voice_id: str) -> str:
         ref = clone_ref_path(voice_id) if voice_id.startswith("clone:") else None
         if ref is not None:
             st = ref.stat()
-            return f"{voice_id}@{st.st_size}-{int(st.st_mtime)}"      # a re-recorded sample is measured again
+            cs = clone_settings(voice_id)               # a new sample, model or expressiveness is measured again
+            return f"{voice_id}@{st.st_size}-{int(st.st_mtime)}|{cs['model']}|{cs['expressiveness']}"
         return voice_id
 
     def _gain_file(self):
@@ -131,16 +142,19 @@ class TTSService:
     def engine_name(self, voice_id: str) -> str:
         return "chatterbox" if voice_id.startswith(("clone:", "chatterbox:")) else "kokoro"
 
+    def engine_for(self, voice_id: str):
+        """Kokoro, Chatterbox Turbo, or the full Chatterbox model (cloned voices set to Best)."""
+        if voice_id.startswith("clone:") and clone_settings(voice_id)["model"] == "full":
+            return self.chatterbox_full
+        return self.chatterbox if self.engine_name(voice_id) == "chatterbox" else self.kokoro
+
     def is_loaded(self, voice_id: str) -> bool:
-        return (self.chatterbox if self.engine_name(voice_id) == "chatterbox" else self.kokoro).loaded
+        return self.engine_for(voice_id).loaded
 
     def ensure_loaded(self, voice_ids) -> None:
         for vid in set(voice_ids):
             with self.gpu:
-                if self.engine_name(vid) == "chatterbox":
-                    self.chatterbox.load()
-                else:
-                    self.kokoro.load()
+                self.engine_for(vid).load()
 
     def resolve(self, voice_id: str | None) -> str:
         """Fall back to the default voice for unknown / deleted voices."""
@@ -168,7 +182,8 @@ class TTSService:
         if not has_speech(text):
             return np.zeros(0, np.float32)
         is_cb = self.engine_name(voice_id) == "chatterbox"
-        eng = self.chatterbox if is_cb else self.kokoro
+        eng = self.engine_for(voice_id)
+        ex = clone_settings(voice_id)["expressiveness"] if voice_id.startswith("clone:") else 0.5
         out: list[np.ndarray] = []
         with self.gpu:
             eng.load()
@@ -177,7 +192,7 @@ class TTSService:
                     continue
                 if is_cb:
                     ref = clone_ref_path(voice_id)
-                    a = eng.synth(chunk, voice_id, str(ref) if ref else None)
+                    a = eng.synth(chunk, voice_id, str(ref) if ref else None, ex)
                 else:
                     a = eng.synth(chunk, voice_id.split(":", 1)[1], speed)
                 a = trim_silence(a)

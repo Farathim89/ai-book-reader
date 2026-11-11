@@ -69,9 +69,42 @@ def clone_voices() -> list[Voice]:
                 m = json.loads(meta.read_text(encoding="utf-8"))
             except ValueError:
                 continue
+            fast = m.get("model") == "turbo"
             out.append(Voice(f"clone:{d.name}", m.get("name", d.name), m.get("gender", "neutral"),
-                             "chatterbox", "cloned voice"))
+                             "chatterbox", "cloned voice, fast" if fast else "cloned voice"))
     return out
+
+
+# How a cloned voice is made: the full Chatterbox model sounds closest to the recording (measured:
+# same-voice score 0.97 vs 0.92 for Turbo) and is about a third slower; Turbo is the fast one.
+CLONE_MODELS = {"full": "Best – closest to the recording", "turbo": "Fast – about a third quicker"}
+DEFAULT_EXPRESSIVENESS = 0.5
+
+
+def clone_settings(voice_id: str) -> dict:
+    """{"model": "full" | "turbo", "expressiveness": 0.25..1.0} of a cloned voice."""
+    meta = clones_dir() / voice_id.split(":", 1)[-1] / "voice.json"
+    try:
+        m = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        m = {}
+    model = m.get("model") if m.get("model") in CLONE_MODELS else "full"
+    try:
+        ex = float(m.get("expressiveness", DEFAULT_EXPRESSIVENESS))
+    except (TypeError, ValueError):
+        ex = DEFAULT_EXPRESSIVENESS
+    return {"model": model, "expressiveness": round(min(1.0, max(0.25, ex)), 2)}
+
+
+def set_clone_settings(voice_id: str, **changes) -> dict:
+    meta = clones_dir() / voice_id.split(":", 1)[-1] / "voice.json"
+    try:
+        m = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        m = {}
+    m.update({k: v for k, v in changes.items() if k in ("model", "expressiveness")})
+    meta.write_text(json.dumps(m), encoding="utf-8")
+    return clone_settings(voice_id)
 
 
 def clone_ref_path(voice_id: str) -> Path | None:
@@ -156,7 +189,7 @@ def load_audio_any(path: str, sr: int = 24000, start: float = 0.0, seconds: floa
 
 
 def add_clone(name: str, gender: str, source: str, start: float = 0.0, seconds: float = 20.0,
-              progress=None) -> Voice:
+              progress=None, model: str = "full", expressiveness: float = DEFAULT_EXPRESSIVENESS) -> Voice:
     """Store a reference clip (trimmed, loudness-levelled 24 kHz mono WAV) for a cloned voice.
     progress(fraction, message) is called while it works (from this thread)."""
     import soundfile as sf
@@ -179,8 +212,9 @@ def add_clone(name: str, gender: str, source: str, start: float = 0.0, seconds: 
     d = clones_dir() / slug
     d.mkdir(parents=True)
     sf.write(str(d / "ref.wav"), a, 24000, subtype="PCM_16")
-    (d / "voice.json").write_text(json.dumps({"name": name, "gender": gender, "source": str(source)}),
-                                  encoding="utf-8")
+    (d / "voice.json").write_text(json.dumps({"name": name, "gender": gender, "source": str(source),
+                                              "start": start, "model": model if model in CLONE_MODELS else "full",
+                                              "expressiveness": expressiveness}), encoding="utf-8")
     report(1.0, "Done")
     return Voice(f"clone:{slug}", name, gender, "chatterbox", "cloned voice")
 

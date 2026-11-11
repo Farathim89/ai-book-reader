@@ -47,6 +47,7 @@ class _Loader(QObject):
     """Parses books on a thread and hands them back on the UI thread."""
     loaded = Signal(int, object, str)    # book id, Book or None, error
     update_found = Signal(object, str)   # Release or None, "manual" / "error:..." / ""
+    voice_news = Signal(str)             # voice model download / loading progress (from any thread)
 
 
 class MainWindow(QMainWindow):
@@ -66,6 +67,8 @@ class MainWindow(QMainWindow):
         self._loader = _Loader()
         self._loader.loaded.connect(self._parsed_ready)
         self._loader.update_found.connect(self._update_checked)
+        self._loader.voice_news.connect(lambda text: self._status(text) if text else None)
+        tts.listeners.append(self._loader.voice_news.emit)
         self._release = None
         updater.cleanup_old()
         self._waiting: dict[int, list] = {}

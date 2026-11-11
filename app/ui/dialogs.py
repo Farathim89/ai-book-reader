@@ -66,6 +66,67 @@ class Previewer:
 
 
 # ---------------------------------------------------------------------------------- voices
+class CloneOptions(QWidget):
+    """Quality (full model / Turbo) and expressiveness of a cloned voice."""
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QSlider
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        self.model = QComboBox()
+        for key, label in V.CLONE_MODELS.items():
+            self.model.addItem(label, key)
+        self.model.setToolTip("Best uses the full Chatterbox model: closest to the recording, about a third slower. "
+                              "It downloads once (3.2 GB) the first time.")
+        self.ex = QSlider(Qt.Horizontal)
+        self.ex.setRange(25, 100)
+        self.ex.setValue(50)
+        self.ex.setFixedWidth(150)
+        self.ex.setToolTip("How lively the voice reads: left = calm and even, right = more emotion. 50 sounds most "
+                           "like the recording.")
+        self.ex_label = muted("")
+        lay.addWidget(muted("Quality"))
+        lay.addWidget(self.model)
+        lay.addSpacing(10)
+        lay.addWidget(muted("Expressiveness"))
+        lay.addWidget(self.ex)
+        lay.addWidget(self.ex_label)
+        lay.addStretch(1)
+        self.model.currentIndexChanged.connect(self._changed)
+        self.ex.valueChanged.connect(self._label)
+        self.ex.sliderReleased.connect(self.changed.emit)
+        self._label()
+
+    def _label(self, *_):
+        v = self.ex.value()
+        word = "calm" if v < 40 else "natural" if v <= 60 else "lively" if v <= 80 else "very lively"
+        self.ex_label.setText(f"{v / 100:.2f}  {word}")
+        self.ex.setEnabled(self.model.currentData() == "full")
+        if not self.ex.isSliderDown():
+            self.changed.emit()
+
+    def _changed(self, *_):
+        self._label()
+
+    def values(self) -> tuple[str, float]:
+        return self.model.currentData(), round(self.ex.value() / 100, 2)
+
+    def set_values(self, model: str, expressiveness: float) -> None:
+        for w in (self.model, self.ex):
+            w.blockSignals(True)
+        self.model.setCurrentIndex(max(0, self.model.findData(model)))
+        self.ex.setValue(int(round(expressiveness * 100)))
+        for w in (self.model, self.ex):
+            w.blockSignals(False)
+        v = self.ex.value()
+        self.ex_label.setText(f"{v / 100:.2f}  " + ("calm" if v < 40 else "natural" if v <= 60 else
+                                                     "lively" if v <= 80 else "very lively"))
+        self.ex.setEnabled(model == "full")
+
+
 class CloneDialog(QDialog):
     _done = Signal(object, str)          # (voice or None, error) from the worker thread
     _prog = Signal(float, str)           # (0..1, what it is doing) from the worker thread
@@ -105,6 +166,12 @@ class CloneDialog(QDialog):
         form.addRow("Start at", self.start)
         form.addRow("Use", self.length)
         lay.addLayout(form)
+        self.options = CloneOptions()
+        lay.addWidget(self.options)
+        tip = muted("Tip: pick calm narration (not dialogue or character voices). Chatterbox listens mostly to "
+                    "the first 10 seconds of the clip.")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
         from PySide6.QtWidgets import QProgressBar
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
@@ -149,10 +216,12 @@ class CloneDialog(QDialog):
         self.step.show()
         args = (self.name.text().strip(), self.gender.currentText(), self.file.text(), self.start.value(),
                 self.length.value())
+        model, ex = self.options.values()
 
         def work():                     # off the window's thread: the window stays usable meanwhile
             try:
-                self._done.emit(V.add_clone(*args, progress=lambda f, m: self._prog.emit(f, m)), "")
+                self._done.emit(V.add_clone(*args, progress=lambda f, m: self._prog.emit(f, m), model=model,
+                                            expressiveness=ex), "")
             except Exception as e:  # noqa: BLE001
                 self._done.emit(None, str(e))
         threading.Thread(target=work, daemon=True).start()
@@ -176,6 +245,8 @@ class CloneDialog(QDialog):
 
 
 class VoicesDialog(QDialog):
+    _news = Signal(str)
+
     def __init__(self, tts, player, settings, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Voices")
@@ -186,12 +257,17 @@ class VoicesDialog(QDialog):
         head = QLabel("Voices")
         head.setStyleSheet("font-size: 15pt; font-weight: 600;")
         lay.addWidget(head)
-        sub = muted("Kokoro voices are fast and clear. Chatterbox voices are cloned from a short recording "
-                    "and are slower to generate (about 3× real time on your GPU).")
+        sub = muted("Kokoro voices are fast and clear. Cloned voices copy someone from a short recording: "
+                    "Best quality sounds closest to them (about 1.8× real time on a good graphics card), "
+                    "Fast is a little quicker (about 2.8×).")
         sub.setWordWrap(True)
         lay.addWidget(sub)
         self.list = QListWidget()
         lay.addWidget(self.list, 1)
+        self.clone_opts = CloneOptions()          # shown for cloned voices
+        self.clone_opts.changed.connect(self._clone_opts_changed)
+        self.clone_opts.hide()
+        lay.addWidget(self.clone_opts)
         self.sample = QLineEdit(PREVIEW_TEXT)
         lay.addWidget(self.sample)
         row = QHBoxLayout()
@@ -219,10 +295,31 @@ class VoicesDialog(QDialog):
         self.busy.hide()
         lay.addWidget(self.busy)
         self.preview.on_status = self._preview_status
+        self._news.connect(self._voice_news)
+        tts.listeners.append(self._news.emit)          # model download / loading progress
         self.list.itemDoubleClicked.connect(lambda _: self._preview())
         self.list.currentItemChanged.connect(self._sel)
         self.changed = False
         self._fill()
+
+    def _voice_news(self, text: str) -> None:
+        if text:
+            self.status.setText(text)
+            self.busy.show()
+
+    def _clone_opts_changed(self) -> None:
+        vid = self._cur() or ""
+        if vid.startswith("clone:"):
+            model, ex = self.clone_opts.values()
+            V.set_clone_settings(vid, model=model, expressiveness=ex)
+            self.changed = True
+
+    def done(self, r: int) -> None:
+        try:
+            self.tts.listeners.remove(self._news.emit)
+        except ValueError:
+            pass
+        super().done(r)
 
     def _preview_status(self, msg: str) -> None:
         self.status.setText(msg + ("  (the first time takes up to half a minute)" if msg.startswith("Loading") else ""))
@@ -247,6 +344,10 @@ class VoicesDialog(QDialog):
     def _sel(self, *_):
         vid = self._cur() or ""
         self.del_btn.setEnabled(vid.startswith("clone:"))
+        self.clone_opts.setVisible(vid.startswith("clone:"))
+        if vid.startswith("clone:"):
+            cs = V.clone_settings(vid)
+            self.clone_opts.set_values(cs["model"], cs["expressiveness"])
 
     def _preview(self) -> None:
         if self._cur():
@@ -274,6 +375,7 @@ class VoicesDialog(QDialog):
         if QMessageBox.question(self, "Delete voice", f"Delete the cloned voice “{v.name}”?") == QMessageBox.Yes:
             V.remove_clone(vid)
             self.tts.chatterbox.forget(vid)
+            self.tts.chatterbox_full.forget(vid)
             self.changed = True
             self._fill()
 
