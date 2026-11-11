@@ -46,6 +46,11 @@ def test_auto_cast_by_gender_and_avoids_narrator():
     assert len(set(cast.values())) == 3
     # existing choices are kept
     assert auto_cast(chars, "kokoro:af_heart", {"Anna": "clone:x"})["Anna"] == "clone:x"
+    # more men than male voices: the extras share with the least talkative men, never the lead
+    many = {f"Man{i}": {"gender": "male", "lines": 100 - i} for i in range(16)}
+    cast = auto_cast(many, "kokoro:af_heart")
+    lead_voice = cast["Man0"]
+    assert all(cast[f"Man{i}"] != lead_voice for i in range(1, 16))
 
 
 def test_castbook_aliases():
@@ -56,6 +61,20 @@ def test_castbook_aliases():
     assert cb.resolve("Unknown") is None
     assert cb.add("Mr. Darcy", "male", []) == "Mr. Darcy"
     assert cb.resolve("Darcy") == "Mr. Darcy"
+
+
+def test_infer_genders_from_titles_and_pronouns():
+    from app.ai.characters import infer_genders
+    b = _book(["“Hello,” he said.", "“Yes?” he asked, and he smiled.", "“No,” she said.",
+               "“Why?” asked her aunt.", "“Go.”"])
+    speakers = {0: "Ron", 1: "Ron", 2: "Aunt Petunia", 3: "Aunt Petunia", 4: "Kid"}
+    data = {"characters": {"Ron": {"gender": "unknown", "aliases": [], "lines": 2},
+                           "Aunt Petunia": {"gender": "unknown", "aliases": [], "lines": 2},
+                           "Kid": {"gender": "unknown", "aliases": [], "lines": 1}},
+            "speakers": {str(k): v for k, v in speakers.items()}}
+    infer_genders(b, data)
+    g = {n: i["gender"] for n, i in data["characters"].items()}
+    assert g == {"Ron": "male", "Aunt Petunia": "female", "Kid": "unknown"}
 
 
 def test_character_chunks_mark_quotes(tmp_path):

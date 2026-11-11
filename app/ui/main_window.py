@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QLabel, QLineEdit, QMainW
 
 from .. import APP_NAME
 from ..ai.ollama import Ollama, OllamaError
-from ..audio.export import ExportJob, safe_filename
+from ..audio.export import ExportJob
 from ..audio.narrator import Narrator
 from ..audio.player import AudioPlayer
 from ..formats import FILE_FILTER, BookError
@@ -24,7 +24,7 @@ from ..tts import voices as V
 from ..tts.planner import VoicePlanner, auto_cast
 from . import theme
 from .comic_view import ComicReader
-from .dialogs import CastDialog, SettingsDialog, VoicesDialog
+from .dialogs import CastDialog, ExportDialog, SettingsDialog, VoicesDialog
 from .jobs import Job, JobTray
 from .library_view import LibraryView
 from .player_bar import PlayerBar
@@ -587,7 +587,7 @@ class MainWindow(QMainWindow):
         self.library.update_settings(book_id, use_characters=True)
         self.jobs.run(job)
 
-    def _apply_characters(self, book_id: int, live: bool = False) -> None:
+    def _apply_characters(self, book_id: int, live: bool = False, final: bool = False) -> None:
         if book_id != self.book_id or not self.book:
             return
         if live and time.time() - self._last_apply < 4:
@@ -596,7 +596,11 @@ class MainWindow(QMainWindow):
         data = store.load_characters(book_id)
         store.apply_speakers(self.book, data)
         bs = self._book_settings()
-        cast = auto_cast(data["characters"], self.narrator.planner.narrator, bs.get("cast") or {})
+        keep = bs.get("cast") or {}
+        if final:   # genders are known now: re-assign every voice the user did not pick by hand
+            manual = set(bs.get("cast_manual") or [])
+            keep = {k: v for k, v in keep.items() if k in manual}
+        cast = auto_cast(data["characters"], self.narrator.planner.narrator, keep)
         if cast != (bs.get("cast") or {}):
             self.library.update_settings(book_id, cast=cast)
         planner = self.narrator.planner
@@ -607,7 +611,7 @@ class MainWindow(QMainWindow):
             self.narrator.set_planner(self._make_planner())
 
     def _characters_done(self, book_id: int) -> None:
-        self._apply_characters(book_id)
+        self._apply_characters(book_id, final=True)
         n = len(store.load_characters(book_id)["characters"])
         if book_id == self.book_id:
             self._status(f"Found {n} speaking characters. Characters ▸ Edit character voices to change who sounds like whom.")
@@ -621,7 +625,10 @@ class MainWindow(QMainWindow):
         d = CastDialog(data["characters"], bs.get("cast") or {}, self.narrator.planner.narrator,
                        bool(bs.get("use_characters")), self.tts, self.preview_player, self)
         if d.exec():
-            self.library.update_settings(self.book_id, cast=d.result_cast(), use_characters=d.use.isChecked())
+            old = set() if d.reset_manual else set(bs.get("cast_manual") or [])
+            manual = sorted(old | d.changed_names)
+            self.library.update_settings(self.book_id, cast=d.result_cast(), use_characters=d.use.isChecked(),
+                                         cast_manual=manual)
             self.narrator.set_planner(self._make_planner())
             self.narrator.preload()
 
@@ -772,18 +779,20 @@ class MainWindow(QMainWindow):
         if self.jobs.busy(title):
             QMessageBox.information(self, "Make audiobook", "This book is already being exported.")
             return
-        out_dir = Path(self.settings["export_dir"] or Path.home())
-        name = safe_filename(f"{r['author']} - {r['title']}" if r["author"] else r["title"]) + ".m4b"
-        out, _ = QFileDialog.getSaveFileName(self, "Save audiobook", str(out_dir / name), "M4B audiobook (*.m4b)")
-        if not out:
+        bs = r["settings"]
+        narrator = V.find_voice(self.tts.resolve(bs.get("narrator") or self.settings["narrator_voice"]))
+        n_chars = len(store.load_characters(book_id)["characters"])
+        chars = (f"character voices on ({n_chars} characters)" if bs.get("use_characters") and n_chars
+                 else "one narrator voice (no character voices)")
+        summary = f"Narrator: {narrator.name} ({narrator.detail}) · {chars} · speed {float(self.settings['speed']):g}×"
+        d = ExportDialog(r["title"], r["author"], self.settings, summary, self)
+        if not d.exec():
             return
-        if not out.lower().endswith(".m4b"):
-            out += ".m4b"
-        self.settings["export_dir"] = str(Path(out).parent)
-        self.settings.save()
+        out = str(d.out_path())
 
         def run(progress, cancelled):
             book = self.book if (book_id == self.book_id and self.book is not None) else store.open_book(book_id, r["path"])
+            book.title, book.author = r["title"] or book.title, r["author"] or book.author   # library (Calibre) names
             if book.unit_count() == 0:
                 raise RuntimeError("This book has no readable text yet. For comics and scanned PDFs, "
                                    "open the book and use Pages ▸ Read text first.")

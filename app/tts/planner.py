@@ -67,6 +67,10 @@ def auto_cast(characters: dict[str, dict], narrator: str, existing: dict[str, st
     used = set(cast.values()) | {narrator}
     pools = {"male": [v for v in MALE_POOL if v not in used],
              "female": [v for v in FEMALE_POOL if v not in used]}
+    # how important the busiest character using each voice is (to share voices with minor characters)
+    weight: dict[str, int] = {}
+    for n, v in cast.items():
+        weight[v] = max(weight.get(v, 0), int(characters.get(n, {}).get("lines", 0)))
     turn = 0
     for name, info in sorted(characters.items(), key=lambda kv: -int(kv[1].get("lines", 0))):
         if name in cast:
@@ -76,7 +80,11 @@ def auto_cast(characters: dict[str, dict], narrator: str, existing: dict[str, st
             g = "male" if turn % 2 == 0 else "female"
             turn += 1
         pool = pools[g]
-        if not pool:  # ran out: reuse, still avoiding the narrator
-            pool[:] = [v for v in (MALE_POOL if g == "male" else FEMALE_POOL) if v != narrator]
-        cast[name] = pool.pop(0)
+        if pool:
+            voice = pool.pop(0)
+        else:   # out of voices: share with the least talkative character of that gender
+            options = [v for v in (MALE_POOL if g == "male" else FEMALE_POOL) if v != narrator]
+            voice = min(options, key=lambda v: weight.get(v, 0))
+        cast[name] = voice
+        weight[voice] = max(weight.get(voice, 0), int(info.get("lines", 0)))
     return cast

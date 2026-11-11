@@ -253,6 +253,8 @@ class CastDialog(QDialog):
         self.voices = V.all_voices()
         self.narrator = narrator
         self.combos: dict[str, QComboBox] = {}
+        self.changed_names: set[str] = set()
+        self.reset_manual = False
         self.status = muted("")
         self.preview.on_status = self.status.setText
         self._fill()
@@ -284,6 +286,7 @@ class CastDialog(QDialog):
                 cb.addItem(v.label, v.id)
             i = cb.findData(self.cast.get(name, ""))
             cb.setCurrentIndex(max(0, i))
+            cb.activated.connect(lambda _=0, n=name: self.changed_names.add(n))   # picked by hand
             self.combos[name] = cb
             self.table.setCellWidget(r, 3, cb)
             b = IconButton("play", "Preview this voice", 12)
@@ -298,10 +301,85 @@ class CastDialog(QDialog):
     def _auto(self) -> None:
         from ..tts.planner import auto_cast
         self.cast = auto_cast(self.characters, self.narrator, {})
+        self.changed_names.clear()
+        self.reset_manual = True
         self._fill()
 
     def result_cast(self) -> dict[str, str]:
         return {name: cb.currentData() for name, cb in self.combos.items() if cb.currentData()}
+
+
+# ---------------------------------------------------------------------------------- export
+class ExportDialog(QDialog):
+    """Where to save the M4B (optionally Audiobookshelf's Author/Title/ layout) and what voices it uses."""
+
+    def __init__(self, title: str, author: str, settings, summary: str, parent=None):
+        super().__init__(parent)
+        from pathlib import Path
+        from ..audio.export import safe_filename
+        self._Path, self._safe = Path, safe_filename
+        self.setWindowTitle("Make audiobook")
+        self.setMinimumWidth(560)
+        self.s = settings
+        self.title, self.author = title or "Audiobook", author or "Unknown"
+        lay = QVBoxLayout(self)
+        head = QLabel(f"Make an M4B audiobook of “{self.title}”")
+        head.setStyleSheet("font-size: 13pt; font-weight: 600;")
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        info = muted(summary + "\nChapters, cover and author/title tags are added. It runs in the background; "
+                     "a stopped export continues where it left off.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        row = QHBoxLayout()
+        self.folder = QLineEdit(settings["export_dir"])
+        b = QPushButton("Browse…")
+        b.clicked.connect(self._browse)
+        row.addWidget(self.folder, 1)
+        row.addWidget(b)
+        form = QFormLayout()
+        form.addRow("Save to", row)
+        self.abs = QCheckBox("Put it in Author \\ Title \\ folders (Audiobookshelf layout)")
+        self.abs.setChecked(bool(settings.get("export_abs_layout", True)))
+        form.addRow("", self.abs)
+        lay.addLayout(form)
+        self.preview = muted("")
+        self.preview.setWordWrap(True)
+        lay.addWidget(self.preview)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Make audiobook")
+        bb.button(QDialogButtonBox.Ok).setObjectName("Accent")
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.folder.textChanged.connect(self._update)
+        self.abs.toggled.connect(self._update)
+        self._update()
+
+    def out_path(self):
+        root = self._Path(self.folder.text().strip() or self._Path.home())
+        name = self._safe(self.title) + ".m4b"
+        if self.abs.isChecked():
+            return root / self._safe(self.author) / self._safe(self.title) / name
+        return root / (self._safe(f"{self.author} - {self.title}") + ".m4b")
+
+    def _update(self) -> None:
+        self.preview.setText(f"File: {self.out_path()}")
+
+    def _browse(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Save audiobooks to", self.folder.text())
+        if d:
+            self.folder.setText(d)
+
+    def _accept(self) -> None:
+        out = self.out_path()
+        if out.exists() and QMessageBox.question(self, "Make audiobook",
+                                                 f"{out.name} already exists. Replace it?") != QMessageBox.Yes:
+            return
+        self.s["export_dir"] = self.folder.text().strip()
+        self.s["export_abs_layout"] = self.abs.isChecked()
+        self.s.save()
+        self.accept()
 
 
 # ---------------------------------------------------------------------------------- settings

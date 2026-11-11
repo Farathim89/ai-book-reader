@@ -16,6 +16,7 @@ DEFAULTS: dict[str, Any] = {
     "library_folders": [],
     "export_dir": str(Path.home() / "Music" / "Audiobooks"),
     "export_bitrate": "64k",
+    "export_abs_layout": True,
     "pause_sentence": 0.18,
     "pause_paragraph": 0.5,
     "pause_heading": 0.8,

@@ -102,6 +102,75 @@ class CastBook:
         return "\n".join(out)
 
 
+MALE_TITLES = re.compile(r"\b(mr|sir|lord|king|prince|uncle|father|brother|duke|baron|count|master|mister|"
+                         r"grandpa|grandfather|dad|papa|monsieur|herr|señor|signor|lad|boy|man)\b\.?", re.I)
+FEMALE_TITLES = re.compile(r"\b(mrs|miss|ms|madam|madame|lady|queen|princess|aunt|auntie|mother|sister|duchess|"
+                           r"baroness|countess|mistress|grandma|grandmother|mom|mum|mama|girl|woman|"
+                           r"mademoiselle|frau|señora|signora)\b\.?", re.I)
+HE = re.compile(r"\b(he|him|his|himself)\b", re.I)
+SHE = re.compile(r"\b(she|her|hers|herself)\b", re.I)
+
+GENDER_SCHEMA = {"type": "object", "properties": {"characters": {"type": "array", "items": {
+    "type": "object", "properties": {"name": {"type": "string"},
+                                     "gender": {"type": "string", "enum": ["male", "female", "unknown"]}},
+    "required": ["name", "gender"]}}}, "required": ["characters"]}
+
+
+def infer_genders(book: Book, data: dict, ollama: Ollama | None = None, model: str | None = None,
+                  title: str = "", author: str = "") -> None:
+    """Fill in 'unknown' genders: title words in the name, he/she around the character's lines,
+    then (optionally) one LLM call that can use what it knows about the book."""
+    chars = data.get("characters", {})
+    speakers = {int(k): v for k, v in data.get("speakers", {}).items()}
+    # 1) pronouns in the narration of paragraphs where only this character speaks
+    votes: dict[str, list[int]] = {}
+    for ch in book.chapters:
+        for p in ch.paragraphs:
+            names = {speakers.get(q.qid) for q in p.quotes} - {None}
+            if len(names) != 1:
+                continue
+            name = names.pop()
+            narration, pos = [], 0
+            for q in p.quotes:
+                narration.append(p.text[pos:q.start])
+                pos = q.end
+            narration.append(p.text[pos:])
+            text = " ".join(narration)
+            if len(text) > 300:
+                continue
+            v = votes.setdefault(name, [0, 0])
+            v[0] += len(HE.findall(text))
+            v[1] += len(SHE.findall(text))
+    for name, info in chars.items():
+        if info.get("gender") in ("male", "female"):
+            continue
+        label = " ".join([name, *info.get("aliases", [])])
+        m, f = bool(MALE_TITLES.search(label)), bool(FEMALE_TITLES.search(label))
+        if m != f:
+            info["gender"] = "male" if m else "female"
+            continue
+        he, she = votes.get(name, [0, 0])
+        if he + she >= 3 and max(he, she) / (he + she) >= 0.7:
+            info["gender"] = "male" if he > she else "female"
+    # 2) ask the model about whoever is still unknown
+    unknown = [n for n, i in chars.items() if i.get("gender") not in ("male", "female")]
+    if ollama and model and unknown:
+        listing = "\n".join(f"- {n}" + (f" (also: {', '.join(chars[n].get('aliases', [])[:3])})"
+                                         if chars[n].get("aliases") else "") for n in unknown[:80])
+        try:
+            res = ollama.chat_json(model, "You know literature well. Answer with JSON only.",
+                                   f"Book: {title or book.title} by {author or book.author}.\n"
+                                   f"Give the gender of each of these characters from the book:\n{listing}\n"
+                                   'Use "unknown" only if you really cannot tell.',
+                                   schema=GENDER_SCHEMA, num_ctx=4096)
+            for c in res.get("characters", []) or []:
+                n, g = str(c.get("name", "")), str(c.get("gender", ""))
+                if n in chars and g in ("male", "female") and chars[n].get("gender") not in ("male", "female"):
+                    chars[n]["gender"] = g
+        except OllamaError:
+            pass
+
+
 def _chunks(book: Book, ci: int, max_words: int = 1400, max_quotes: int = 45):
     """Yield (context_paragraph_texts, marked_paragraph_texts, quote_ids) for chapter ci."""
     paras = book.chapters[ci].paragraphs
@@ -193,6 +262,8 @@ def analyze_book(book: Book, data: dict, ollama: Ollama, model: str,
     # drop characters that never actually spoke
     for name in [n for n, i in cast.chars.items() if i.get("lines", 0) == 0]:
         del cast.chars[name]
+    progress(0.995, "Working out genders")
+    infer_genders(book, data, ollama, model)
     if save:
         save(data)
     progress(1.0, f"{len(cast.chars)} characters")
