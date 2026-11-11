@@ -92,17 +92,62 @@ def ffmpeg_exe() -> str | None:
         return None
 
 
-def load_audio_any(path: str, sr: int = 24000) -> np.ndarray:
-    """Decode any audio file to mono float32 at ``sr`` (via ffmpeg, falls back to soundfile)."""
+def _decode_with_progress(exe: str, path: str, sr: int, start: float, seconds: float, progress) -> np.ndarray:
+    """Like load_audio_any, reporting 0..1 as ffmpeg works (its -progress output) through progress(f)."""
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".f32")
+    os.close(fd)
+    cmd = [exe, "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-y"]
+    if start > 0:
+        cmd += ["-ss", f"{start:.3f}"]
+    cmd += ["-i", str(path), "-t", f"{seconds:.3f}", "-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", tmp]
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        for line in p.stdout:
+            key, _, value = line.strip().partition("=")
+            if key in ("out_time_us", "out_time_ms") and value.isdigit():      # both are microseconds
+                progress(min(1.0, int(value) / 1e6 / seconds))
+        err = p.stderr.read()
+        if p.wait() != 0:
+            raise ValueError(f"Could not read this recording ({err.strip()[-200:] or 'ffmpeg failed'}).")
+        progress(1.0)
+        return np.fromfile(tmp, dtype=np.float32)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def load_audio_any(path: str, sr: int = 24000, start: float = 0.0, seconds: float | None = None,
+                   progress=None) -> np.ndarray:
+    """Decode any audio file to mono float32 at ``sr`` (via ffmpeg, falls back to soundfile).
+    start / seconds decode only that part: ffmpeg seeks straight there, so a 20 s clip from a
+    10-hour audiobook takes a moment instead of decoding (and holding) the whole book."""
     exe = ffmpeg_exe()
+    if exe and progress and seconds:
+        return _decode_with_progress(exe, path, sr, start, seconds, progress)
     if exe:
-        r = subprocess.run([exe, "-hide_banner", "-loglevel", "error", "-i", str(path), "-ac", "1",
-                            "-ar", str(sr), "-f", "f32le", "pipe:1"], capture_output=True,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if r.returncode == 0 and r.stdout:
+        cmd = [exe, "-hide_banner", "-loglevel", "error"]
+        if start > 0:
+            cmd += ["-ss", f"{start:.3f}"]
+        cmd += ["-i", str(path)]
+        if seconds:
+            cmd += ["-t", f"{seconds:.3f}"]
+        cmd += ["-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "pipe:1"]
+        r = subprocess.run(cmd, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if r.returncode == 0:               # empty when start is past the end
             return np.frombuffer(r.stdout, dtype=np.float32).copy()
     import soundfile as sf
-    data, file_sr = sf.read(str(path), dtype="float32", always_2d=True)
+    try:
+        with sf.SoundFile(str(path)) as f:
+            file_sr = f.samplerate
+            f.seek(min(int(start * file_sr), f.frames))
+            data = f.read(int(seconds * file_sr) if seconds else -1, dtype="float32", always_2d=True)
+    except (sf.LibsndfileError, RuntimeError) as e:
+        raise ValueError(f"Could not read this recording ({e}).") from e
     data = data.mean(axis=1)
     if file_sr != sr:
         import librosa
@@ -110,13 +155,20 @@ def load_audio_any(path: str, sr: int = 24000) -> np.ndarray:
     return data.astype(np.float32)
 
 
-def add_clone(name: str, gender: str, source: str, start: float = 0.0, seconds: float = 20.0) -> Voice:
-    """Store a reference clip (trimmed, loudness-levelled 24 kHz mono WAV) for a cloned voice."""
+def add_clone(name: str, gender: str, source: str, start: float = 0.0, seconds: float = 20.0,
+              progress=None) -> Voice:
+    """Store a reference clip (trimmed, loudness-levelled 24 kHz mono WAV) for a cloned voice.
+    progress(fraction, message) is called while it works (from this thread)."""
     import soundfile as sf
-    audio = load_audio_any(source, 24000)
-    a = audio[int(start * 24000): int((start + seconds) * 24000)]
+    report = progress or (lambda f, msg: None)
+    report(0.0, "Reading the recording…")
+    a = load_audio_any(source, 24000, start, seconds,
+                       progress=lambda f: report(0.9 * f, f"Reading the recording… {int(f * seconds)} of "
+                                                          f"{int(seconds)} s"))[: int(seconds * 24000)]
+    report(0.92, "Saving the voice…")
     if len(a) < 6 * 24000:
-        raise ValueError("The voice sample must have at least 6 seconds of speech (10-30 s works best).")
+        raise ValueError("The voice sample must have at least 6 seconds of speech (10-30 s works best). "
+                         "Is 'Start at' past the end of the recording?")
     peak = float(np.max(np.abs(a))) or 1.0
     a = (a / peak * 0.9).astype(np.float32)
     slug = slugify(name)
@@ -129,6 +181,7 @@ def add_clone(name: str, gender: str, source: str, start: float = 0.0, seconds: 
     sf.write(str(d / "ref.wav"), a, 24000, subtype="PCM_16")
     (d / "voice.json").write_text(json.dumps({"name": name, "gender": gender, "source": str(source)}),
                                   encoding="utf-8")
+    report(1.0, "Done")
     return Voice(f"clone:{slug}", name, gender, "chatterbox", "cloned voice")
 
 

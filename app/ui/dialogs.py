@@ -67,6 +67,9 @@ class Previewer:
 
 # ---------------------------------------------------------------------------------- voices
 class CloneDialog(QDialog):
+    _done = Signal(object, str)          # (voice or None, error) from the worker thread
+    _prog = Signal(float, str)           # (0..1, what it is doing) from the worker thread
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add a cloned voice")
@@ -102,13 +105,26 @@ class CloneDialog(QDialog):
         form.addRow("Start at", self.start)
         form.addRow("Use", self.length)
         lay.addLayout(form)
+        from PySide6.QtWidgets import QProgressBar
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        self.bar.hide()
+        self.step = muted("")
+        self.step.hide()
+        lay.addWidget(self.bar)
+        lay.addWidget(self.step)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Add voice")
         bb.button(QDialogButtonBox.Ok).setObjectName("Accent")
         bb.accepted.connect(self._accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+        self.bb = bb
         self.voice: V.Voice | None = None
+        self._done.connect(self._finished)
+        self._prog.connect(self._on_progress)
 
     def _browse(self) -> None:
         f, _ = QFileDialog.getOpenFileName(self, "Voice recording", "",
@@ -123,12 +139,39 @@ class CloneDialog(QDialog):
         if not self.name.text().strip() or not self.file.text():
             QMessageBox.information(self, "Add voice", "Enter a name and choose a recording.")
             return
-        try:
-            self.voice = V.add_clone(self.name.text().strip(), self.gender.currentText(), self.file.text(),
-                                     self.start.value(), self.length.value())
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "Add voice", str(e))
+        import threading
+        ok = self.bb.button(QDialogButtonBox.Ok)
+        ok.setEnabled(False)
+        ok.setText("Adding…")
+        self.bar.setValue(0)
+        self.bar.show()
+        self.step.setText("Starting…")
+        self.step.show()
+        args = (self.name.text().strip(), self.gender.currentText(), self.file.text(), self.start.value(),
+                self.length.value())
+
+        def work():                     # off the window's thread: the window stays usable meanwhile
+            try:
+                self._done.emit(V.add_clone(*args, progress=lambda f, m: self._prog.emit(f, m)), "")
+            except Exception as e:  # noqa: BLE001
+                self._done.emit(None, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_progress(self, f: float, msg: str) -> None:
+        self.bar.setValue(int(max(0.0, min(1.0, f)) * 100))
+        self.step.setText(msg)
+
+    def _finished(self, voice, err: str) -> None:
+        if voice is None:
+            ok = self.bb.button(QDialogButtonBox.Ok)
+            ok.setEnabled(True)
+            ok.setText("Add voice")
+            self.bar.hide()
+            self.step.hide()
+            QMessageBox.warning(self, "Add voice", err or "Could not read the recording.")
             return
+        self.voice = voice
+        self.bar.setValue(100)
         self.accept()
 
 
@@ -168,11 +211,23 @@ class VoicesDialog(QDialog):
         row.addWidget(self.status, 1)
         row.addWidget(self.add_btn)
         lay.addLayout(row)
-        self.preview.on_status = self.status.setText
+        from PySide6.QtWidgets import QProgressBar
+        self.busy = QProgressBar()             # moving bar while a voice model loads / a preview is made
+        self.busy.setRange(0, 0)
+        self.busy.setTextVisible(False)
+        self.busy.setFixedHeight(6)
+        self.busy.hide()
+        lay.addWidget(self.busy)
+        self.preview.on_status = self._preview_status
         self.list.itemDoubleClicked.connect(lambda _: self._preview())
         self.list.currentItemChanged.connect(self._sel)
         self.changed = False
         self._fill()
+
+    def _preview_status(self, msg: str) -> None:
+        self.status.setText(msg + ("  (the first time takes up to half a minute)" if msg.startswith("Loading") else ""))
+        self.busy.setVisible(bool(msg))
+        self.play_btn.setEnabled(not msg)
 
     def _fill(self, select: str | None = None) -> None:
         self.list.clear()
