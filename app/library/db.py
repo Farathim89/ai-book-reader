@@ -74,6 +74,25 @@ class Library:
                 if col not in have:
                     self.conn.execute(f"ALTER TABLE books ADD COLUMN {col} {decl}")
             self.conn.commit()
+        self.repair_covers()
+
+    def repair_covers(self) -> int:
+        """Covers live in data/covers. A library that moved with the app folder (or was copied from
+        another build) can still name the old folder: point those rows at the covers that are here."""
+        here = data_dir() / "covers"
+        with self.lock:
+            rows = self.conn.execute("SELECT id, cover FROM books WHERE IFNULL(cover, '') != ''").fetchall()
+            fixes = []
+            for book_id, cover in rows:
+                if os.path.exists(cover):
+                    continue
+                alt = here / Path(cover.replace("\\", "/")).name
+                if alt.exists():
+                    fixes.append((str(alt), book_id))
+            if fixes:
+                self.conn.executemany("UPDATE books SET cover=? WHERE id=?", fixes)
+                self.conn.commit()
+        return len(fixes)
 
     # ---- queries ------------------------------------------------------------
     def books(self) -> list[dict]:

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QMenu, QS
 
 from ..library.libraries import fmt_clock
 from . import theme
+from .voice_picker import VoiceCombo
 from .shelf import paint_cover
 from .widgets import IconButton, muted
 
@@ -234,7 +235,7 @@ class PlayerBar(QFrame):
         # right: voice, characters, chapters, reader, volume, close
         right = QHBoxLayout()
         right.setSpacing(4)
-        self.voice = QComboBox()
+        self.voice = VoiceCombo()
         self.voice.setMinimumWidth(170)
         self.voice.setMaximumWidth(220)
         self.voice.setToolTip("Narrator voice for this book")
@@ -298,16 +299,10 @@ class PlayerBar(QFrame):
     def set_voices(self, voices, current: str) -> None:
         self.voice.blockSignals(True)
         self.voice.clear()
-        for title, vs in (("Kokoro voices", [v for v in voices if v.engine == "kokoro"]),
-                          ("Cloned / Chatterbox", [v for v in voices if v.engine == "chatterbox"])):
-            if not vs:
-                continue
-            self.voice.addItem(f"— {title} —", None)
-            self.voice.model().item(self.voice.count() - 1).setEnabled(False)
-            for v in vs:
-                self.voice.addItem(v.label, v.id)
+        for v in voices:            # the list opens in columns: female | male, cloned voices below
+            self.voice.addItem(v.label, v.id)
         i = self.voice.findData(current)
-        self.voice.setCurrentIndex(i if i >= 0 else 1)
+        self.voice.setCurrentIndex(max(i, 0))
         self.voice.blockSignals(False)
 
     def set_characters(self, available: bool, on: bool) -> None:

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QFontComboBox)
 
 from ..tts import voices as V
+from .voice_picker import VoiceCombo
 from . import theme
 from .widgets import IconButton, muted
 
@@ -285,7 +286,7 @@ class CastDialog(QDialog):
             self.table.setItem(r, 0, it)
             self.table.setItem(r, 1, QTableWidgetItem(info.get("gender", "unknown")))
             self.table.setItem(r, 2, QTableWidgetItem(str(info.get("lines", 0))))
-            cb = QComboBox()
+            cb = VoiceCombo()
             cb.addItem("Narrator voice", "")
             for v in self.voices:
                 cb.addItem(v.label, v.id)
