@@ -20,6 +20,7 @@ STAGE = ROOT / "build" / "lite" / "Ai Book Reader"
 
 SETUP = r"""
 import sys, time
+sys.stdout.reconfigure(errors="replace")      # CI consoles are not UTF-8 (tqdm bars print block characters)
 sys.path.insert(0, sys.argv[1])
 from app import setup_runtime as S
 assert S.is_lite(), "the portable's Python does not see itself as the portable"
@@ -47,7 +48,7 @@ def main() -> int:
     env = {k: v for k, v in os.environ.items() if k not in ("HF_HOME", "PYTHONPATH", "PYTHONHOME")}
     env["ABR_DATA_DIR"] = str(data)
     print(f"== Set up in {STAGE} (data: {data})", flush=True)
-    return subprocess.run([str(py), "-u", "-c", SETUP, str(STAGE), "1" if models else "0"], env=env,
+    return subprocess.run([str(py), "-u", "-X", "utf8", "-c", SETUP, str(STAGE), "1" if models else "0"], env=env,
                           cwd=STAGE).returncode
 
 
