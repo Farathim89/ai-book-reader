@@ -24,6 +24,31 @@ def test_walk_moves_toward_what_scores_better():
     assert best.shape == start.shape and best.dtype == np.float32
     with pytest.raises(KS.Cancelled):
         KS.walk(start, stock, score, 10, rng, spread, cancelled=lambda: True)
+    cps = []
+    KS.walk(start, stock, score, 100, rng, spread, every=25, on_checkpoint=cps.append)
+    assert len(cps) == 4 and all(c.shape == start.shape for c in cps)
+
+
+def test_quality_plans_practise_and_check_on_different_sentences():
+    for name, plan in KS.QUALITY.items():
+        assert not set(plan["fit"]) & set(plan["check"]), name          # checked on sentences it never practised
+        assert max(plan["fit"] + plan["check"]) < len(KS.PRACTICE)
+        assert plan["starts"] * plan["explore"] < plan["steps"]
+    q, b = KS.QUALITY["quick"], KS.QUALITY["best"]
+    assert (q["fit"], q["check"], q["steps"]) == ([0, 1, 2, 3], [4, 5], 1000)   # Quick is the 1.2.8 search
+    assert len(b["fit"]) > len(q["fit"]) and b["minutes"] > q["minutes"] and b["starts"] > 1 and b["every"]
+
+
+def test_fast_voice_dialog_offers_quality():
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    if not isinstance(app, QApplication):
+        pytest.skip("needs a QApplication")
+    from app.ui.dialogs import FastVoiceDialog
+    assert FastVoiceDialog("Ann", False).quality() == "quick"
+    d = FastVoiceDialog("Ann", True, "UK", "best")
+    assert (d.accent(), d.quality()) == ("UK", "best")
 
 
 def test_target_windows_from_a_short_recording(tmp_path):
@@ -54,6 +79,10 @@ def test_fast_voice_is_listed_routed_and_removed(tmp_path, monkeypatch):
     assert (fast.id, fast.name, fast.engine, fast.gender) == (f"fast:{slug}", "Narrator (fast)", "kokoro", "female")
     assert V.kokoro_arg(fast.id) == str(pack) and V.kokoro_arg("kokoro:af_bella") == "af_bella"
     assert tts.resolve(fast.id) == fast.id and tts.engine_for(fast.id) is tts.kokoro
+    V.add_clone("Zed", "male", str(rec), seconds=10)
+    ids = [v.id for v in V.all_voices()]
+    assert ids.index(fast.id) == ids.index(clone.id) + 1                 # listed right after its cloned voice
+    assert ids[-1] == "clone:zed"
     key = tts._gain_key(fast.id)
     import os
     os.utime(pack, (pack.stat().st_atime, pack.stat().st_mtime + 5))     # made again: measured again

@@ -23,6 +23,7 @@ from . import theme
 from .gamepad import Gamepad
 from .player_bar import SLEEP, SPEEDS
 from .shelf import paint_cover
+from .widgets import paint_shape, shape_for_glyph
 
 COVER_W, COVER_H = 190, 285
 CARD_W, CARD_H = COVER_W + 28, COVER_H + 86
@@ -170,10 +171,15 @@ class TvButton(TvFocusable):
         fg = QColor(20, 20, 20) if self.focused else QColor(theme.ACCENT if self.active else theme.TEXT)
         x = r.left() + 22
         if self.glyph:
-            p.setFont(theme.icon_font(int(self.px * 1.05)))
-            p.setPen(fg)
             gr = QRectF(x, r.top(), self.px * 1.6, r.height())
-            p.drawText(gr, Qt.AlignVCenter | Qt.AlignLeft, self.glyph)
+            kind = shape_for_glyph(self.glyph)
+            if kind:                            # media icons: crisp filled shapes, like the player bar
+                size = self.px * 1.25
+                paint_shape(p, kind, gr.left(), gr.center().y() - size / 2, size, fg)
+            else:
+                p.setFont(theme.icon_font(int(self.px * 1.05)))
+                p.setPen(fg)
+                p.drawText(gr, Qt.AlignVCenter | Qt.AlignLeft, self.glyph)
             x += self.px * 1.6 + 6
         p.setFont(_font(self.px, True))
         p.setPen(fg)

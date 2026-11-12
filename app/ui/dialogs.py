@@ -400,8 +400,10 @@ class TrainDialog(QDialog):
 
 class FastVoiceDialog(QDialog):
     """Make a fast Kokoro version of a cloned voice: what it is, how long it takes, which pronunciation."""
+    QUALITIES = [("quick", "Quick – about 5-10 minutes"),
+                 ("best", "Best – about 15-20 minutes, closest to the person")]
 
-    def __init__(self, name: str, again: bool, accent: str = "US", parent=None):
+    def __init__(self, name: str, again: bool, accent: str = "US", quality: str = "quick", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Fast Kokoro version")
         self.setMinimumWidth(540)
@@ -418,9 +420,17 @@ class FastVoiceDialog(QDialog):
         self.pron.setCurrentIndex(max(0, self.pron.findData(accent)))
         self.pron.setToolTip("How it pronounces words. You can change it later (right-click the fast voice).")
         form.addRow("Pronunciation", self.pron)
+        self.qual = QComboBox()
+        for key, label in self.QUALITIES:
+            self.qual.addItem(label, key)
+        self.qual.setCurrentIndex(max(0, self.qual.findData(quality)))
+        self.qual.setToolTip("Best practises on twice as many sentences, listens to twice as much of the recording, "
+                             "tries three starting voices and keeps the version that sounds most like the person "
+                             "on sentences it never practised.")
+        form.addRow("Quality", self.qual)
         lay.addLayout(form)
-        note = muted("It takes about 5-10 minutes on your graphics card (follow it in the Tasks panel); reading "
-                     "aloud waits meanwhile." + (" The fast version it has now is replaced." if again else "")
+        note = muted("Follow it in the Tasks panel; reading aloud waits meanwhile."
+                     + (" The fast version it has now is replaced." if again else "")
                      + " Only for your own listening: don't share voices of real people.")
         note.setWordWrap(True)
         lay.addWidget(note)
@@ -436,6 +446,9 @@ class FastVoiceDialog(QDialog):
 
     def accent(self) -> str:
         return self.pron.currentData()
+
+    def quality(self) -> str:
+        return self.qual.currentData()
 
 
 class VoicesDialog(QDialog):
@@ -676,10 +689,12 @@ class VoicesDialog(QDialog):
         clone_id = "clone:" + vid.split(":", 1)[1] if vid.startswith(("clone:", "fast:")) else ""
         if not clone_id or self.fast_cb is None:
             return
-        d = FastVoiceDialog(V.find_voice(clone_id).name, V.fast_pack(clone_id) is not None,
-                            V.fast_accent(clone_id), self)
+        info = V.fast_info(clone_id)
+        d = FastVoiceDialog(V.find_voice(clone_id).name, info is not None, V.fast_accent(clone_id),
+                            # made before: offer Best next (Quick if it already was Best, for a quicker redo)
+                            "best" if info is not None and info.get("quality", "quick") == "quick" else "quick", self)
         if d.exec():
-            self.fast_cb(clone_id, d.accent())
+            self.fast_cb(clone_id, d.accent(), d.quality())
             self.status.setText("Making the fast version – follow it in the Tasks panel.")
 
     def _set_accent(self, accent: str) -> None:

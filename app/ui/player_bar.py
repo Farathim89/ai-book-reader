@@ -12,7 +12,7 @@ from ..library.libraries import fmt_clock
 from . import theme
 from .voice_picker import VoiceCombo
 from .shelf import paint_cover
-from .widgets import IconButton, muted
+from .widgets import IconButton, ShapeButton, muted
 
 SPEEDS = [0.75, 0.85, 1.0, 1.1, 1.2, 1.35, 1.5, 1.75, 2.0]
 SLEEP = [("Off", None), ("5 minutes", 5), ("10 minutes", 10), ("15 minutes", 15), ("30 minutes", 30),
@@ -179,12 +179,12 @@ class PlayerBar(QFrame):
         center = QVBoxLayout()
         center.setSpacing(2)
         controls = QHBoxLayout()
-        controls.setSpacing(6)
+        controls.setSpacing(10)
         controls.addStretch(1)
-        self.sleep = QToolButton()
-        self.sleep.setToolTip("Sleep timer")
+        self.sleep = ShapeButton("moon", "Sleep timer", 20)
         self.sleep.setPopupMode(QToolButton.InstantPopup)
-        self.sleep.setCursor(Qt.PointingHandCursor)
+        self.sleep.setMinimumSize(40, 40)
+        self.sleep.setMaximumHeight(40)
         self._sleep_menu = QMenu(self)
         for label, val in SLEEP:
             act = QAction(label, self._sleep_menu)
@@ -193,20 +193,21 @@ class PlayerBar(QFrame):
         self.sleep.setMenu(self._sleep_menu)
         self.set_sleep_label("")
         controls.addWidget(self.sleep)
-        self.prev_ch = IconButton("prev", "Previous chapter (Ctrl+Left)", 17)
-        self.prev_s = IconButton("rewind", "Previous sentence (Left)", 17)
-        self.play = QToolButton()
+        self.prev_ch = ShapeButton("prev", "Previous chapter (Ctrl+Left)", 22)
+        self.prev_s = ShapeButton("rewind", "Previous sentence (Left)", 24)
+        self.play = ShapeButton("play", "Play (Space)", 22, color="#161616")
         self.play.setObjectName("PlayButton")
-        theme.use_icon_font(self.play, 18)
         self.play.setFixedSize(44, 44)
-        self.play.setCursor(Qt.PointingHandCursor)
-        self.next_s = IconButton("forward", "Next sentence (Right)", 17)
-        self.next_ch = IconButton("next", "Next chapter (Ctrl+Right)", 17)
+        self.next_s = ShapeButton("forward", "Next sentence (Right)", 24)
+        self.next_ch = ShapeButton("next", "Next chapter (Ctrl+Right)", 22)
+        for b in (self.prev_ch, self.prev_s, self.next_s, self.next_ch):
+            b.setFixedSize(40, 40)
         self.speed = QToolButton()
         self.speed.setPopupMode(QToolButton.InstantPopup)
         self.speed.setToolTip("Reading speed")
         self.speed.setCursor(Qt.PointingHandCursor)
         self.speed.setStyleSheet("font-size: 10.5pt; font-weight: 600; padding: 4px 8px;")
+        self.speed.setMinimumSize(48, 40)
         sm = QMenu(self)
         for s in SPEEDS:
             a = QAction(f"{s:g}×", sm)
@@ -278,8 +279,7 @@ class PlayerBar(QFrame):
         for lab in (self.elapsed, self.remaining):
             lab.setStyleSheet(f"color: {theme.MUTED}; font-size: 9pt;")
         theme.use_icon_font(self.vol_icon, 14, f"color: {theme.MUTED};")
-        if theme.I["moon"] + "  " in self.sleep.text():
-            self.set_sleep_label(self.sleep.text().split("  ", 1)[1])
+        self.set_sleep_label(self.sleep.label)
         self.track.update()
 
     # ---- setters ----------------------------------------------------------------
@@ -322,16 +322,13 @@ class PlayerBar(QFrame):
         self.volume.blockSignals(False)
 
     def set_sleep_label(self, text: str) -> None:
-        if text:
-            self.sleep.setText(f"{theme.I['moon']}  {text}")
-            self.sleep.setStyleSheet(f'font-family: "{theme.ICON_FONT}", "Segoe UI"; font-size: 14px; color: {theme.YELLOW};')
-        else:
-            self.sleep.setText(theme.I["moon"])
-            self.sleep.setStyleSheet(f'font-family: "{theme.ICON_FONT}"; font-size: 15px;')
+        """Time left on the sleep timer next to the moon, both in yellow while it runs."""
+        self.sleep.color = theme.YELLOW if text else None
+        self.sleep.set_label(text)
 
     def set_state(self, state: str) -> None:
         playing = state in ("playing", "loading")
-        self.play.setText(theme.I["pause"] if playing else theme.I["play"])
+        self.play.set_kind("pause" if playing else "play")
         self.play.setToolTip("Pause (Space)" if playing else "Play (Space)")
 
     def set_position(self, unit: int, chapter_title: str, chapter: int, chapters: int,

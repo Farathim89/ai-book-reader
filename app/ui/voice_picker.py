@@ -2,6 +2,8 @@
 voices underneath. It is a normal QComboBox otherwise (items, itemData, findData, activated)."""
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
@@ -21,12 +23,32 @@ def group_of(label: str, data) -> str:
     """'female', 'male', 'other' (cloned / Chatterbox) or 'special' (e.g. 'Narrator voice')."""
     if not data:
         return "special"
-    words = split_label(label)[1].lower().split()
+    words = re.findall(r"[a-z]+", split_label(label)[1].lower())     # 'US female, Kokoro 1.1': no stray comma
     if "female" in words:
         return "female"
     if "male" in words:
         return "male"
     return "other"
+
+
+def _tidy(text: str) -> str:
+    return ", ".join(p.strip() for p in text.split(",") if p.strip())
+
+
+def short_detail(detail: str, group: str) -> str:
+    """What the popup shows beside a name - the heading already says the rest:
+    'US female, Kokoro 1.1' -> 'US, Kokoro 1.1' (female column), 'cloned voice, trained' -> 'trained',
+    'UK, Kokoro copy of a cloned voice' -> 'UK' (the name already ends in '(fast)')."""
+    if group in ("female", "male"):
+        return _tidy(re.sub(r"\b(fe)?male\b", "", detail, flags=re.I))
+    if group == "other":
+        return _tidy(detail.replace("Kokoro copy of a cloned voice", "").replace("cloned voice", ""))
+    return detail
+
+
+def accent_of(detail: str) -> str:
+    """'US, Kokoro 1.1' -> 'US'."""
+    return (re.findall(r"[A-Za-z]+", detail) or [""])[0]
 
 
 class _VoicePopup(QFrame):
@@ -56,11 +78,9 @@ class _VoicePopup(QFrame):
             label, data = combo.itemText(i), combo.itemData(i)
             name, detail = split_label(label)
             g = group_of(label, data)
-            if g in ("female", "male"):
-                detail = " ".join(w for w in detail.split() if w.lower() not in ("female", "male"))
-            groups[g].append((i, name, detail))
+            groups[g].append((i, name, short_detail(detail, g)))
         for g in ("female", "male"):                       # US voices first, then UK, list order kept
-            groups[g].sort(key=lambda t: (t[2] != "US", t[2]))
+            groups[g].sort(key=lambda t: (accent_of(t[2]) != "US", accent_of(t[2])))
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 8, 6, 8)
         lay.setSpacing(2)
@@ -103,23 +123,46 @@ class _VoicePopup(QFrame):
 
     def _button(self, index: int, name: str, detail: str, wide: bool = False) -> QPushButton:
         """Name on the left, accent / detail dimmer on the right."""
-        b = QPushButton()
+        width = self.COL_W * 2 + 6 if wide else self.COL_W
+        b = QPushButton(self)                   # parented now, so the labels pick up the popup's style to measure
         b.setToolTip(self.combo.itemText(index))
         b.setCursor(Qt.PointingHandCursor)
         b.setProperty("current", index == self.combo.currentIndex())
-        b.setFixedSize(self.COL_W * 2 + 6 if wide else self.COL_W, 30)
+        b.setFixedSize(width, 30)
         b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         row = QHBoxLayout(b)
         row.setContentsMargins(10, 0, 10, 0)
+        labs = []
         for text, obj in ((name, "Name"), (detail, "Detail")):
-            lab = QLabel(text)
+            lab = QLabel(text, b)
             lab.setObjectName(obj)
             lab.setAttribute(Qt.WA_TransparentForMouseEvents)
             row.addWidget(lab)
+            labs.append(lab)
             if obj == "Name":
                 row.addStretch(1)
+        self._fit(*labs, width - 20)
         b.clicked.connect(lambda _=False, i=index: self._pick(i))
         return b
+
+    @staticmethod
+    def _fit(name: QLabel, detail: QLabel, room: int) -> None:
+        """A name too long for its button: shorten the detail first, then drop it and shorten the name
+        (the tooltip has the full text)."""
+        GAP, MIN_DETAIL = 8, 40
+        for lab in (name, detail):
+            lab.ensurePolished()
+        nfm, dfm = name.fontMetrics(), detail.fontMetrics()
+        nw = nfm.horizontalAdvance(name.text())
+        if not detail.text() or nw + GAP + dfm.horizontalAdvance(detail.text()) <= room:
+            if nw > room:
+                name.setText(nfm.elidedText(name.text(), Qt.ElideRight, room))
+            return
+        if room - nw - GAP >= MIN_DETAIL:
+            detail.setText(dfm.elidedText(detail.text(), Qt.ElideRight, room - nw - GAP))
+            return
+        detail.hide()
+        name.setText(nfm.elidedText(name.text(), Qt.ElideRight, room))
 
     def _pick(self, index: int) -> None:
         self.close()

@@ -9,12 +9,13 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath,
                            QPen, QPixmap)
 from PySide6.QtWidgets import QAbstractScrollArea, QToolTip
 
 from . import theme
+from .widgets import paint_shape
 
 
 @dataclass
@@ -131,54 +132,88 @@ def _plain(w: int, h: int, color: str, slab: bool) -> QPixmap:
     return _WOOD[key]
 
 
-def wall_pixmap(style: str | None = None) -> QPixmap:
+def _at_scale(pm: QPixmap, dpr: float) -> QPixmap:
+    """The texture pre-stretched to the screen's scale (e.g. 250%), so painting it is a plain copy -
+    stretching it on every repaint was a big part of the cost of resizing the window."""
+    if abs(dpr - 1.0) < 0.01:
+        return pm
+    key = ("scaled", pm.cacheKey(), round(dpr, 2))
+    if key not in _WOOD:
+        img = pm.toImage().scaled(round(pm.width() * dpr), round(pm.height() * dpr), Qt.IgnoreAspectRatio,
+                                  Qt.SmoothTransformation).convertToFormat(QImage.Format_RGB32)
+        out = QPixmap.fromImage(img)
+        out.setDevicePixelRatio(dpr)
+        _WOOD[key] = out
+    return _WOOD[key]
+
+
+def wall_pixmap(style: str | None = None, dpr: float = 1.0) -> QPixmap:
     kind, wall, _ = SHELF_STYLES[style if style in SHELF_STYLES else SHELF_STYLE]
     if kind == "stone":
-        return _stone(512, 512, wall, False, 5)
+        return _at_scale(_stone(512, 512, wall, False, 5), dpr)
     if kind == "plain":
-        return _plain(512, 512, theme.BG, False)
-    return _wood(512, 512, wall, False, 7)
+        return _at_scale(_plain(512, 512, theme.BG, False), dpr)
+    return _at_scale(_wood(512, 512, wall, False, 7), dpr)
 
 
-def plank_pixmap(style: str | None = None) -> QPixmap:
+def plank_pixmap(style: str | None = None, dpr: float = 1.0) -> QPixmap:
     kind, _, plank = SHELF_STYLES[style if style in SHELF_STYLES else SHELF_STYLE]
     if kind == "stone":
-        return _stone(512, 64, plank, True, 9)
+        return _at_scale(_stone(512, 64, plank, True, 9), dpr)
     if kind == "plain":
-        return _plain(512, 64, theme.SURFACE2, True)
-    return _wood(512, 64, plank, True, 11)
+        return _at_scale(_plain(512, 64, theme.SURFACE2, True), dpr)
+    return _at_scale(_wood(512, 64, plank, True, 11), dpr)
 
 
 # ------------------------------------------------------------------------------------------ covers
 class CoverCache:
-    def __init__(self, limit: int = 700):
-        self.limit = limit
+    """Covers scaled and cropped once per size. With `radius` the rounded corners are cut out here too, so
+    painting is a plain copy (a clip path + stretch per cover, per repaint, made resizing the window lag)."""
+
+    def __init__(self, budget_mb: int = 320):
+        self.budget = budget_mb * 1024 * 1024
+        self.used = 0
         self._c: OrderedDict[tuple, QPixmap | None] = OrderedDict()
 
-    def get(self, path: str | None, w: int, h: int) -> QPixmap | None:
+    def get(self, path: str | None, w: int, h: int, dpr: float = 2.0, radius: float = 0.0) -> QPixmap | None:
         if not path:
             return None
-        key = (path, w, h)
+        key = (path, w, h, round(dpr, 2), radius)
         if key in self._c:
             self._c.move_to_end(key)
             return self._c[key]
-        pm = QPixmap(path)
-        if pm.isNull():
-            out = None
-        else:
-            dpr = 2.0
-            pm = pm.scaled(int(w * dpr), int(h * dpr), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-            x, y = (pm.width() - int(w * dpr)) // 2, (pm.height() - int(h * dpr)) // 2
-            out = pm.copy(x, y, int(w * dpr), int(h * dpr))
+        img = QImage(path)
+        out = None
+        if not img.isNull() and w > 0 and h > 0:
+            tw, th = max(1, round(w * dpr)), max(1, round(h * dpr))
+            img = img.scaled(tw, th, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            img = img.copy((img.width() - tw) // 2, (img.height() - th) // 2, tw, th)
+            img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+            if radius:
+                cut = QImage(tw, th, QImage.Format_ARGB32_Premultiplied)
+                cut.fill(Qt.transparent)
+                q = QPainter(cut)
+                q.setRenderHint(QPainter.Antialiasing)
+                q.setPen(Qt.NoPen)
+                q.setBrush(QBrush(img))
+                q.drawRoundedRect(QRectF(0, 0, tw, th), radius * dpr, radius * dpr)
+                q.end()
+                img = cut
+            out = QPixmap.fromImage(img)
             out.setDevicePixelRatio(dpr)
+            self.used += tw * th * 4
         self._c[key] = out
-        while len(self._c) > self.limit:
-            self._c.popitem(last=False)
+        while self.used > self.budget and len(self._c) > 1:
+            _, old = self._c.popitem(last=False)
+            if old is not None:
+                self.used -= old.width() * old.height() * 4
         return out
 
     def drop(self, path: str) -> None:
         for k in [k for k in self._c if k[0] == path]:
-            del self._c[k]
+            old = self._c.pop(k)
+            if old is not None:
+                self.used -= old.width() * old.height() * 4
 
 
 COVERS = CoverCache()
@@ -209,8 +244,39 @@ def paint_placeholder(p: QPainter, r: QRectF, title: str, subtitle: str = "") ->
         p.drawText(r.adjusted(pad, 0, -pad, -pad), Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignBottom, subtitle)
 
 
+_SHADOWS: dict[tuple, tuple[QPixmap, QPixmap]] = {}
+
+
+def _shadow_strips(w: int, h: int, dpr: float) -> tuple[QPixmap, QPixmap]:
+    """The cover shadow as two ready-made strips: right of the cover and below it (the cover hides the rest).
+    Three see-through layers per cover, drawn on every repaint, were a large part of the resize cost."""
+    key = (w, h, round(dpr, 2))
+    if key not in _SHADOWS:
+        strips = []
+        for sw, sh, rects in ((6, h + 2, lambda k: QRectF(0, k, k, h - k * 0.7)),
+                              (w + 6, 2, lambda k: QRectF(k * 0.5, 0, w - k * 0.5 + k, k * 0.3))):
+            pm = QPixmap(max(1, round(sw * dpr)), max(1, round(sh * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.transparent)
+            q = QPainter(pm)
+            for k, a in ((6, 40), (4, 60), (2, 80)):
+                q.fillRect(rects(k), QColor(0, 0, 0, a))
+            q.end()
+            strips.append(pm)
+        _SHADOWS[key] = (strips[0], strips[1])
+    return _SHADOWS[key]
+
+
+def _dpr(p: QPainter) -> float:
+    d = p.device()
+    return d.devicePixelRatioF() if d is not None else 1.0
+
+
 def paint_cover(p: QPainter, r: QRectF, path: str | None, title: str, subtitle: str = "", radius: float = 3) -> None:
-    pm = COVERS.get(path, int(r.width()), int(r.height()))
+    pm = COVERS.get(path, round(r.width()), round(r.height()), _dpr(p), radius)
+    if pm:
+        p.drawPixmap(r.topLeft(), pm)                 # already the right size, corners already rounded
+        return
     clip = QPainterPath()
     clip.addRoundedRect(r, radius, radius)
     p.save()
@@ -420,9 +486,10 @@ class Shelf(QAbstractScrollArea):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         vw, vh = self.viewport().width(), self.viewport().height()
         sx, sy = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
-        wall = wall_pixmap()
+        dpr = _dpr(p)
+        wall = wall_pixmap(dpr=dpr)
         p.drawTiledPixmap(QRect(0, 0, vw, vh), wall, QPoint(sx % 512, sy % 512))
-        plank = plank_pixmap()
+        plank = plank_pixmap(dpr=dpr)
         if not self.items:
             self._paint_planks(p, vw, vh, sy, plank, max(1, vh // self.row_h + 1))
             p.setPen(QColor(255, 255, 255, 200))
@@ -462,9 +529,10 @@ class Shelf(QAbstractScrollArea):
     def _paint_item(self, p: QPainter, i: int, r: QRectF) -> None:
         it = self.items[i]
         hovered = i == self._hover
-        # shadow behind the cover
-        for k, a in ((6, 40), (4, 60), (2, 80)):
-            p.fillRect(r.adjusted(k * 0.5, k, k, k * 0.3), QColor(0, 0, 0, a))
+        # shadow behind the cover: only the strips that show right of it and below it (it hides the rest)
+        right, below = _shadow_strips(round(r.width()), round(r.height()), _dpr(p))
+        p.drawPixmap(QPointF(r.right(), r.top()), right)
+        p.drawPixmap(QPointF(r.left(), r.bottom()), below)
         if it.kind == "series":
             self._paint_series(p, it, r)
         elif it.kind == "author":
@@ -498,9 +566,8 @@ class Shelf(QAbstractScrollArea):
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor(theme.GREEN_HOVER if self._hover_play else theme.GREEN))
                 p.drawEllipse(pr)
-                p.setPen(QColor("white"))
-                p.setFont(theme.icon_font(int(pr.width() * 0.38)))
-                p.drawText(pr.adjusted(pr.width() * 0.06, 0, 0, 0), Qt.AlignCenter, theme.I["play"])
+                d = pr.width() * 0.52
+                paint_shape(p, "play", pr.center().x() - d / 2, pr.center().y() - d / 2, d, "white")
 
     def _play_rect(self, r: QRectF) -> QRectF:
         d = max(34, min(60, r.width() * 0.36))
@@ -511,8 +578,30 @@ class Shelf(QAbstractScrollArea):
         top = r.bottom() - 3 + (self.plank_h - self.label_h) / 2
         return QRectF(r.left(), top, r.width(), self.label_h)
 
+    _LABELS: OrderedDict = OrderedDict()           # rendered label plates, shared by all shelves
+
     def _paint_label(self, p: QPainter, r: QRectF, title: str, sub: str, hovered: bool) -> None:
         plate = self.label_rect(r)
+        dpr = _dpr(p)
+        key = (title, sub, round(plate.width()), round(plate.height()), hovered, self.cover_w, round(dpr, 2),
+               theme.YELLOW, theme.MUTED)
+        pm = self._LABELS.get(key)
+        if pm is None:
+            pm = QPixmap(round((plate.width() + 2) * dpr), round((plate.height() + 2) * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.transparent)
+            q = QPainter(pm)
+            q.setRenderHint(QPainter.Antialiasing)
+            self._draw_label(q, QRectF(1, 1, plate.width(), plate.height()), title, sub, hovered)
+            q.end()
+            self._LABELS[key] = pm
+            while len(self._LABELS) > 600:
+                self._LABELS.popitem(last=False)
+        else:
+            self._LABELS.move_to_end(key)
+        p.drawPixmap(plate.topLeft() - QPointF(1, 1), pm)
+
+    def _draw_label(self, p: QPainter, plate: QRectF, title: str, sub: str, hovered: bool) -> None:
         path = QPainterPath()
         path.addRoundedRect(plate, 4, 4)
         p.fillPath(path, QColor(0, 0, 0, 150 if not hovered else 190))

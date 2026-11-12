@@ -6,8 +6,9 @@ to the person, then try thousands of small changes and keep each one that makes 
 (Chatterbox's voice encoder) hear the person more - the random-walk idea of KVoiceWalk, done with the app's
 own parts. The result reads at Kokoro speed; it copies the sound of the voice, the reading style stays Kokoro's.
 
-Measured on an audiobook narrator (held-out sentences): likeness 0.72 for the closest ready-made voice ->
-0.87 after 1000 steps (an independent judge, WavLM: 0.87 -> 0.965; the cloned voice itself: 0.97)."""
+Measured on an audiobook narrator, 16 sentences of the real audiobook that no search practised on
+(likeness / independent WavLM judge): closest ready-made voice 0.72 / 0.87, Quick 0.84 / 0.92,
+Best 0.88 / 0.96 (the cloned voice itself 0.90 / 0.97). Best levels off by ~1150 steps."""
 from __future__ import annotations
 
 import json
@@ -25,7 +26,22 @@ PRACTICE = [              # what the candidates read while searching (never the 
     "Of course, nothing about that plan was going to be easy. Still, it was better than doing nothing.",
     "He laughed, shook his head, and told me to come back when I had something better to offer.",
     "We spent the whole morning sorting through old boxes, looking for a map that might not even exist.",
+    "Are you sure? Because if you're wrong about this, we're going to have a very long walk home.",
+    "She opened the letter slowly, read it twice, and then folded it back into the envelope without a word.",
+    "Wait! Don't touch that!",
+    "By the time the rain stopped, the streets were empty and the shops had already closed for the night.",
+    "Honestly, I think he knew all along. He just wanted to see what we would do.",
+    "The old clock in the hall struck midnight, and somewhere upstairs a door creaked open.",
 ]
+# Quick: the search used since 1.2.8. Best: twice the practice sentences (a voice that holds up on any sentence,
+# not just a few), twice the recording to listen to, three starting voices tried, and the version kept that
+# sounds most like the person on sentences it never practised (checked every `every` steps).
+QUALITY = {
+    "quick": {"steps": 1000, "minutes": 8.0, "fit": [0, 1, 2, 3], "check": [4, 5], "starts": 1, "explore": 0,
+              "every": 0},
+    "best": {"steps": 1600, "minutes": 16.0, "fit": [0, 1, 2, 3, 6, 7, 8, 9], "check": [4, 5, 10, 11],
+             "starts": 3, "explore": 300, "every": 250},
+}
 WINDOW = 4.0              # seconds of the person's voice per target piece
 
 
@@ -34,10 +50,11 @@ class Cancelled(Exception):
 
 
 def walk(start: np.ndarray, stock: list[np.ndarray], score, steps: int, rng: np.random.Generator,
-         spread: np.ndarray, on_step=None, cancelled=lambda: False):
+         spread: np.ndarray, on_step=None, cancelled=lambda: False, every: int = 0, on_checkpoint=None):
     """Greedy random walk from `start`. score(pack) -> (value, info); higher is better.
     A move is a random nudge of one shared 256-number offset (scaled by `spread`, so every sentence length moves
-    together) or, now and then, a small pull toward one of the ready-made voices. Returns (best, value, info)."""
+    together) or, now and then, a small pull toward one of the ready-made voices. Every `every` steps the best so
+    far goes to on_checkpoint(best). Returns (best, value, info)."""
     best = start
     best_v, best_info = score(best)
     size, fails = 0.35, 0
@@ -58,6 +75,8 @@ def walk(start: np.ndarray, stock: list[np.ndarray], score, steps: int, rng: np.
                 size, fails = max(0.04, size * 0.7), 0
         if on_step is not None:
             on_step(step, best_v, best_info)
+        if every and on_checkpoint is not None and step % every == 0:
+            on_checkpoint(best)
     return best, best_v, best_info
 
 
@@ -83,11 +102,12 @@ def _target_windows(source: str, ref_wav: str, minutes: float) -> list[np.ndarra
     return wins
 
 
-def make_kokoro_voice(engine, source: str, ref_wav: str, out_path: Path, minutes: float = 8.0, steps: int = STEPS,
-                      progress=None, cancelled=lambda: False, seed: int = 7, accent: str = "US") -> dict:
+def make_kokoro_voice(engine, source: str, ref_wav: str, out_path: Path, minutes: float | None = None,
+                      steps: int | None = None, progress=None, cancelled=lambda: False, seed: int = 7,
+                      accent: str = "US", quality: str = "quick") -> dict:
     """Search a voicepack for the person in `source` (falls back to the clip `ref_wav`) and save it to out_path
     (a torch .pt file Kokoro reads) with a report next to it (kokoro.json). `engine` is the app's KokoroEngine;
-    accent "US" / "UK" is the pronunciation it searches (and later reads) with."""
+    accent "US" / "UK" is the pronunciation it searches (and later reads) with; quality "quick" / "best" (QUALITY)."""
     import librosa
     import torch
 
@@ -97,6 +117,10 @@ def make_kokoro_voice(engine, source: str, ref_wav: str, out_path: Path, minutes
     report = progress or (lambda f, m: None)
     t0 = time.time()
     rng = np.random.default_rng(seed)
+    quality = quality if quality in QUALITY else "quick"
+    plan = QUALITY[quality]
+    steps = steps or plan["steps"]
+    minutes = minutes or plan["minutes"]
 
     report(0.01, "Listening to the voice…")
     wins = _target_windows(source, ref_wav, minutes)
@@ -128,7 +152,7 @@ def make_kokoro_voice(engine, source: str, ref_wav: str, out_path: Path, minutes
         model, pipe = engine.model, engine._pipe("b" if accent == "UK" else "a")
         ps_all = [next(iter(pipe(t, voice="bf_emma" if accent == "UK" else "af_heart", speed=PACE))).phonemes
                   for t in PRACTICE]
-        fit, check = ps_all[:4], ps_all[4:]
+        fit, check = [ps_all[i] for i in plan["fit"]], [ps_all[i] for i in plan["check"]]
 
         def render(pack: np.ndarray, ps_list) -> list[np.ndarray]:
             out = []
@@ -163,12 +187,37 @@ def make_kokoro_voice(engine, source: str, ref_wav: str, out_path: Path, minutes
 
         spread = np.stack(list(stock.values())).std(0).mean(0, keepdims=True).astype(np.float32)   # [1, 1, 256]
 
-        def on_step(step, value, info):
-            if step % 20 == 0 or step == steps:
-                report(0.12 + 0.86 * step / steps,
-                       f"Searching for the voice… step {step} of {steps} · likeness {info['sim'] * 100:.0f}%")
+        done = [0]                                    # steps finished in earlier walks
 
-        best, _, info = walk(cands[start_name], list(stock.values()), score, steps, rng, spread, on_step, cancelled)
+        def on_step(step, value, info):
+            n = done[0] + step
+            if n % 20 == 0 or n == steps:
+                report(0.12 + 0.86 * n / steps,
+                       f"Searching for the voice… step {n} of {steps} · likeness {info['sim'] * 100:.0f}%")
+
+        stock_list = list(stock.values())
+        cur = cands[start_name]
+        if plan["starts"] > 1:                        # try the best few starts a little, go on with the winner
+            tries = []
+            for name in sorted(scored, key=lambda n: scored[n][0], reverse=True)[:plan["starts"]]:
+                b, _, _ = walk(cands[name], stock_list, score, plan["explore"], rng, spread, on_step, cancelled)
+                done[0] += plan["explore"]
+                tries.append((score(b, check)[0], name, b))
+            _, start_name, cur = max(tries, key=lambda t: t[0])
+            start_sim = scored[start_name][1]["sim"]
+        kept = {"pack": cur, "check": score(cur, check)[0] if plan["every"] else 0.0}
+
+        def checkpoint(pack):                         # keep what sounds most like them on unseen sentences
+            v = score(pack, check)[0]
+            if v > kept["check"]:
+                kept.update(pack=pack, check=v)
+
+        best, _, info = walk(cur, stock_list, score, steps - done[0], rng, spread, on_step, cancelled,
+                             every=plan["every"], on_checkpoint=checkpoint)
+        if plan["every"]:
+            checkpoint(best)
+            best = kept["pack"]
+            info = score(best)[1]
         check_sim = score(best, check)[1]["sim"]
     finally:
         ve.to("cpu")
@@ -182,7 +231,7 @@ def make_kokoro_voice(engine, source: str, ref_wav: str, out_path: Path, minutes
               "closest_ready_made": names[ranked[0][1]], "likeness": round(info["sim"], 4),
               "likeness_unseen": round(check_sim, 4), "pitch_offset_semitones": round(float(info["pitch"]), 2),
               "steps": steps, "seconds": round(time.time() - t0), "date": time.strftime("%Y-%m-%d %H:%M"),
-              "accent": "UK" if accent == "UK" else "US"}
+              "accent": "UK" if accent == "UK" else "US", "quality": quality}
     out_path.with_name("kokoro.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
     report(1.0, "Done")
     return result

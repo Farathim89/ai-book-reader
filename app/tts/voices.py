@@ -376,8 +376,11 @@ def kokoro_lang(voice_id: str) -> str:
 
 
 def all_voices() -> list[Voice]:
+    """Kokoro, Chatterbox, then each cloned voice followed by its fast Kokoro version (when it has one)."""
+    fast = {f.id.split(":", 1)[1]: f for f in fast_voices()}
+    mine = [x for v in clone_voices() for x in (v, fast.get(v.id.split(":", 1)[1])) if x]
     return kokoro_voices() + [Voice(CHATTERBOX_DEFAULT, "Chatterbox", "female", "chatterbox",
-                                    "expressive, built-in")] + clone_voices() + fast_voices()
+                                    "expressive, built-in")] + mine
 
 
 def find_voice(voice_id: str | None) -> Voice:
