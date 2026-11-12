@@ -130,6 +130,7 @@ class CloneOptions(QWidget):
 class CloneDialog(QDialog):
     _done = Signal(object, str)          # (voice or None, error) from the worker thread
     _prog = Signal(float, str)           # (0..1, what it is doing) from the worker thread
+    _found = Signal(object, str)         # (find_best_clip result or None, error)
 
     def __init__(self, parent=None, voice_id: str | None = None):
         super().__init__(parent)
@@ -161,10 +162,21 @@ class CloneDialog(QDialog):
         self.length.setRange(6, 60)
         self.length.setValue(20)
         self.length.setSuffix(" s")
+        start_row = QHBoxLayout()
+        start_row.addWidget(self.start, 1)
+        self.find_btn = QPushButton("Find the best part")
+        self.find_btn.setToolTip("Listens through the whole recording and picks clean narration in the main voice "
+                                 "(skips intros, music, other speakers and character voices)")
+        self.find_btn.clicked.connect(self._find_best)
+        start_row.addWidget(self.find_btn)
+        self.found = muted("")
+        self.found.setWordWrap(True)
+        self.found.hide()
         form.addRow("Name", self.name)
         form.addRow("Gender", self.gender)
         form.addRow("Recording", row)
-        form.addRow("Start at", self.start)
+        form.addRow("Start at", start_row)
+        form.addRow("", self.found)
         form.addRow("Use", self.length)
         lay.addLayout(form)
         self.options = CloneOptions()
@@ -194,6 +206,7 @@ class CloneDialog(QDialog):
         self.voice: V.Voice | None = None
         self._done.connect(self._finished)
         self._prog.connect(self._on_progress)
+        self._found.connect(self._found_done)
         self.orig = None
         if voice_id:
             info = V.clone_info(voice_id)
@@ -228,6 +241,46 @@ class CloneDialog(QDialog):
             if not self.name.text():
                 from pathlib import Path
                 self.name.setText(Path(f).stem[:30])
+            from ..tts.clip_finder import media_duration
+            if (media_duration(f) or 0) > 180:          # long recordings: the opening is often not the voice
+                self._find_best()
+
+    def _find_best(self) -> None:
+        path = self.file.text()
+        if not path:
+            QMessageBox.information(self, self.windowTitle(), "Choose a recording first.")
+            return
+        import threading
+        self.find_btn.setEnabled(False)
+        self.bb.button(QDialogButtonBox.Ok).setEnabled(False)
+        self.bar.setValue(0)
+        self.bar.show()
+        self.step.setText("Listening through the recording…")
+        self.step.show()
+        seconds = self.length.value()
+
+        def work():
+            from ..tts.clip_finder import find_best_clip
+            try:
+                self._found.emit(find_best_clip(path, seconds, progress=lambda f, m: self._prog.emit(f, m)), "")
+            except Exception as e:  # noqa: BLE001
+                self._found.emit(None, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _found_done(self, result, err: str) -> None:
+        self.find_btn.setEnabled(True)
+        self.bb.button(QDialogButtonBox.Ok).setEnabled(True)
+        self.bar.hide()
+        self.step.hide()
+        if result is None:
+            QMessageBox.warning(self, self.windowTitle(), f"Could not listen through the recording: {err}")
+            return
+        s = int(result["start"])
+        self.start.setValue(result["start"])
+        where = f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+        self.found.setText(f"Picked {where} of {result['windows']} places: clean narration in the main voice "
+                           f"(voice match {result['typical']:.2f}, clean {int(result['clean'] * 100)}%).")
+        self.found.show()
 
     def _accept(self) -> None:
         if not self.name.text().strip() or not self.file.text():
