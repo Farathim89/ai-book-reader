@@ -1776,11 +1776,48 @@ class MainWindow(QMainWindow):
 
     # =========================================================================== dialogs
     def show_voices(self) -> None:
-        d = VoicesDialog(self.tts, self.preview_player, self.settings, self)
+        d = VoicesDialog(self.tts, self.preview_player, self.settings, self, train=self.train_voice)
         d.exec()
         if d.changed and self.book:
             self.player_bar.set_voices(V.all_voices(), self.narrator.planner.narrator)
             self.narrator.set_planner(self._make_planner())
+
+    def train_voice(self, voice_id: str, source: str, minutes: int) -> None:
+        """Teach a cloned voice the person's delivery from a longer recording (Tasks panel)."""
+        import shutil
+        from ..tts import voice_training as VT
+        name = V.find_voice(voice_id).name
+        folder = V.clones_dir() / voice_id.split(":", 1)[1]
+        work = folder / "training-new"
+        tts = self.tts
+
+        def run(progress, cancelled):
+            shutil.rmtree(work, ignore_errors=True)
+            with tts.gpu:                           # reading aloud waits while the voice trains
+                tts.chatterbox_full.load()
+                model = tts.chatterbox_full.model
+                cs = V.clone_settings(voice_id)
+                tts.chatterbox_full.forget(voice_id)
+                try:
+                    report = VT.train_voice(model, str(folder / "ref.wav"), source, work, minutes=minutes,
+                                            expressiveness=cs["expressiveness"], progress=progress,
+                                            cancelled=cancelled)
+                except VT.Cancelled:
+                    shutil.rmtree(work, ignore_errors=True)
+                    raise
+                finally:
+                    tts.chatterbox_full._conds.clear()          # training changed the model's conditionals
+                for f in ("adapter.safetensors", "training.json", "dataset.json"):
+                    (work / f).replace(folder / f)
+                shutil.rmtree(work, ignore_errors=True)
+                tts.chatterbox_full.forget(voice_id)
+            return (f"{name} trained on {report['minutes']:.0f} min: its delivery fits the real reading "
+                    f"{report['improvement'] * 100:.0f}% better")
+        job = Job(f"Training voice: {name}"[:70], run, heavy=True)
+        self.jobs.run(job, on_done=lambda msg: self._status(msg),
+                      on_failed=lambda e: QMessageBox.warning(self, "Train voice", e))
+        if not self.jobs_panel.isVisible():
+            self._toggle_jobs()
 
     def show_settings(self, start_tab: str = "") -> None:
         try:

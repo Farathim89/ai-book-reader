@@ -263,8 +263,13 @@ class ChatterboxFullEngine:
     def forget(self, key: str) -> None:
         for k in [k for k in self._conds if k.split("|")[0] == key]:
             self._conds.pop(k, None)
+        if self.model is not None:
+            from .voice_training import forget_adapter
+            forget_adapter(self.model.t3, key)
 
-    def synth(self, text: str, key: str, ref_path: str | None, expressiveness: float = 0.5) -> np.ndarray:
+    def synth(self, text: str, key: str, ref_path: str | None, expressiveness: float = 0.5,
+              adapter=None) -> np.ndarray:
+        """adapter: path of the voice's trained adapter (voice_training.py), switched on for this call."""
         import contextlib
         import io
         import torch
@@ -275,6 +280,8 @@ class ChatterboxFullEngine:
                 m.prepare_conditionals(ref_path, exaggeration=expressiveness)
             self._conds[ck] = m.conds
         m.conds = self._conds[ck]
+        from .voice_training import use_adapter
+        use_adapter(m.t3, key if adapter else None, adapter)
         with torch.inference_mode(), contextlib.redirect_stdout(io.StringIO()):
             wav = m.generate(text, exaggeration=expressiveness, cfg_weight=cfg_for(expressiveness))
         return wav.squeeze(0).cpu().numpy().astype(np.float32)

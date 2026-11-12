@@ -335,11 +335,75 @@ class CloneDialog(QDialog):
         self.accept()
 
 
+class TrainDialog(QDialog):
+    """Train a cloned voice on more of the person's recordings (voice_training.py)."""
+
+    def __init__(self, voice_id: str, parent=None):
+        super().__init__(parent)
+        info = V.clone_info(voice_id)
+        self.setWindowTitle(f"Train “{info['name']}” on more audio")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        intro = muted("A short clip gives the sound of a voice. Training on a longer recording of the same person "
+                      "(the audiobook they narrated) teaches the voice how they read: pace, rhythm and acting. "
+                      "Pick a recording with mostly this one voice.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        form = QFormLayout()
+        row = QHBoxLayout()
+        self.file = QLineEdit(info["source"])
+        self.file.setReadOnly(True)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        row.addWidget(self.file, 1)
+        row.addWidget(browse)
+        form.addRow("Recording", row)
+        self.minutes = QComboBox()
+        for m, label in ((15, "15 minutes  (quick)"), (30, "30 minutes  (recommended)"), (60, "60 minutes  (most)")):
+            self.minutes.addItem(label, m)
+        self.minutes.setCurrentIndex(1)
+        form.addRow("Use", self.minutes)
+        lay.addLayout(form)
+        note = muted("It runs in the background (Tasks panel) and takes roughly as long as the minutes you pick, on "
+                     "your graphics card; reading aloud waits meanwhile. The first time it also downloads the "
+                     "speech recogniser (1.6 GB). Only for your own listening: don't share voices of real people.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Start training")
+        bb.button(QDialogButtonBox.Ok).setObjectName("Accent")
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _browse(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(self, "Recording to train on", "",
+                                           "Audio (*.m4b *.m4a *.mp3 *.wav *.flac *.ogg *.opus *.aac *.mp4 *.mkv);;All files (*)")
+        if f:
+            self.file.setText(f)
+
+    def _accept(self) -> None:
+        import os
+        if not self.file.text() or not os.path.exists(self.file.text()):
+            QMessageBox.information(self, self.windowTitle(), "Pick the recording to train on.")
+            return
+        from ..tts.clip_finder import media_duration
+        if (media_duration(self.file.text()) or 0) < 300:
+            QMessageBox.information(self, self.windowTitle(), "That recording is too short: training needs at least "
+                                    "5 minutes of this voice (30 minutes or more is best).")
+            return
+        self.accept()
+
+    def values(self) -> tuple[str, int]:
+        return self.file.text(), int(self.minutes.currentData())
+
+
 class VoicesDialog(QDialog):
     _news = Signal(str)
 
-    def __init__(self, tts, player, settings, parent=None):
+    def __init__(self, tts, player, settings, parent=None, train=None):
         super().__init__(parent)
+        self.train_cb = train                    # main window: start a "Training voice" task
         self.setWindowTitle("Voices")
         self.resize(720, 560)
         self.tts, self.settings = tts, settings
@@ -480,8 +544,31 @@ class VoicesDialog(QDialog):
         if vid.startswith("clone:"):
             m.addSeparator()
             m.addAction("Edit…  (name, recording, start, length)", self._edit)
+            if self.train_cb is not None:
+                m.addAction("Train on more audio…", self._train)
+            if V.clone_adapter(vid) is not None:
+                m.addAction("Forget the training", self._forget_training)
             m.addAction("Delete", self._delete)
         m.exec(self.list.viewport().mapToGlobal(pos))
+
+    def _train(self) -> None:
+        vid = self._cur() or ""
+        if not vid.startswith("clone:") or self.train_cb is None:
+            return
+        d = TrainDialog(vid, self)
+        if d.exec():
+            source, minutes = d.values()
+            self.train_cb(vid, source, minutes)
+            self.status.setText("Training started – follow it in the Tasks panel.")
+
+    def _forget_training(self) -> None:
+        vid = self._cur() or ""
+        if QMessageBox.question(self, "Forget the training", "Go back to the voice as it was before training?"
+                                ) == QMessageBox.Yes:
+            V.forget_training(vid)
+            self.tts.chatterbox_full.forget(vid)
+            self.changed = True
+            self._fill(vid)
 
     def _edit(self) -> None:
         vid = self._cur() or ""

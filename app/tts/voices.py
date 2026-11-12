@@ -70,8 +70,10 @@ def clone_voices() -> list[Voice]:
             except ValueError:
                 continue
             fast = m.get("model") == "turbo"
+            trained = (d / "adapter.safetensors").exists() and not fast
+            detail = "cloned voice, fast" if fast else "cloned voice, trained" if trained else "cloned voice"
             out.append(Voice(f"clone:{d.name}", m.get("name", d.name), m.get("gender", "neutral"),
-                             "chatterbox", "cloned voice, fast" if fast else "cloned voice"))
+                             "chatterbox", detail))
     return out
 
 
@@ -94,6 +96,31 @@ def clone_settings(voice_id: str) -> dict:
     except (TypeError, ValueError):
         ex = DEFAULT_EXPRESSIVENESS
     return {"model": model, "expressiveness": round(min(1.0, max(0.25, ex)), 2)}
+
+
+def clone_adapter(voice_id: str) -> Path | None:
+    """The trained adapter of a cloned voice (voice_training.py), or None when it is not trained."""
+    if not voice_id.startswith("clone:"):
+        return None
+    p = clones_dir() / voice_id.split(":", 1)[-1] / "adapter.safetensors"
+    return p if p.exists() else None
+
+
+def clone_training(voice_id: str) -> dict | None:
+    """What the training reported (minutes, sentences, improvement, date), or None."""
+    p = clones_dir() / voice_id.split(":", 1)[-1] / "training.json"
+    if clone_adapter(voice_id) is None:
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def forget_training(voice_id: str) -> None:
+    d = clones_dir() / voice_id.split(":", 1)[-1]
+    for name in ("adapter.safetensors", "training.json", "dataset.json"):
+        (d / name).unlink(missing_ok=True)
 
 
 def set_clone_settings(voice_id: str, **changes) -> dict:

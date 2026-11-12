@@ -14,7 +14,8 @@ import numpy as np
 
 from ..formats.textproc import has_speech, speech_text, split_for_tts
 from .engines import SR, ChatterboxEngine, ChatterboxFullEngine, KokoroEngine
-from .voices import CHATTERBOX_DEFAULT, DEFAULT_VOICE, clone_ref_path, clone_settings, ffmpeg_exe, find_voice
+from .voices import (CHATTERBOX_DEFAULT, DEFAULT_VOICE, clone_adapter, clone_ref_path, clone_settings, ffmpeg_exe,
+                     find_voice)
 
 NATURAL_PACE = 0.9          # 1.0x = an audiobook narrator's pace (the raw voices speak ~10% faster)
 TARGET_LUFS = -19.0         # audiobook loudness (ACX / Audible range), the same for every voice
@@ -111,8 +112,10 @@ class TTSService:
         ref = clone_ref_path(voice_id) if voice_id.startswith("clone:") else None
         if ref is not None:
             st = ref.stat()
-            cs = clone_settings(voice_id)               # a new sample, model or expressiveness is measured again
-            return f"{voice_id}@{st.st_size}-{int(st.st_mtime)}|{cs['model']}|{cs['expressiveness']}"
+            cs = clone_settings(voice_id)               # a new sample, model, expressiveness or training:
+            ad = clone_adapter(voice_id)                # measured again
+            trained = f"|t{int(ad.stat().st_mtime)}" if ad is not None and cs["model"] == "full" else ""
+            return f"{voice_id}@{st.st_size}-{int(st.st_mtime)}|{cs['model']}|{cs['expressiveness']}{trained}"
         return voice_id
 
     def _gain_file(self):
@@ -192,7 +195,10 @@ class TTSService:
                     continue
                 if is_cb:
                     ref = clone_ref_path(voice_id)
-                    a = eng.synth(chunk, voice_id, str(ref) if ref else None, ex)
+                    if eng is self.chatterbox_full:
+                        a = eng.synth(chunk, voice_id, str(ref) if ref else None, ex, adapter=clone_adapter(voice_id))
+                    else:
+                        a = eng.synth(chunk, voice_id, str(ref) if ref else None, ex)
                 else:
                     a = eng.synth(chunk, voice_id.split(":", 1)[1], speed)
                 a = trim_silence(a)
