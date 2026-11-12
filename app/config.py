@@ -17,6 +17,7 @@ DEFAULTS: dict[str, Any] = {
     "export_dir": str(Path.home() / "Music" / "Audiobooks"),
     "export_bitrate": "64k",
     "export_abs_layout": True,
+    "export_paragraphs": True,       # exports read a paragraph per call (smoother) instead of per sentence
     # breaks like a human narrator's (measured on real audiobooks: most sentence ends 0.4-0.9 s,
     # paragraphs ~1 s); the voices' own trailing silence comes on top
     "pause_sentence": 0.45,

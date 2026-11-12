@@ -648,6 +648,11 @@ class ExportDialog(QDialog):
         self.skip.setChecked(True)
         self.skip.setVisible(bool(series))
         form.addRow("", self.skip)
+        self.paragraphs = QCheckBox("Read whole paragraphs at once (smoother flow; character voices still switch)")
+        self.paragraphs.setToolTip("The voice reads a paragraph in one go instead of starting fresh at every "
+                                   "sentence. Breaks between sentences come from the voice itself.")
+        self.paragraphs.setChecked(bool(settings.get("export_paragraphs", True)))
+        form.addRow("", self.paragraphs)
         lay.addLayout(form)
         self.preview = muted("")
         self.preview.setWordWrap(True)
@@ -689,6 +694,7 @@ class ExportDialog(QDialog):
             return
         self.s["export_dir"] = self.folder.text().strip()
         self.s["export_abs_layout"] = self.abs.isChecked()
+        self.s["export_paragraphs"] = self.paragraphs.isChecked()
         self.s.save()
         self.accept()
 

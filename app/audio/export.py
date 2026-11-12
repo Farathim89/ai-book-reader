@@ -71,7 +71,8 @@ def ffmeta(title: str, author: str, chapters: list[tuple[str, float]]) -> str:
 class ExportJob:
     def __init__(self, book_id: int, book: Book, planner: VoicePlanner, tts: TTSService, out_path: str,
                  speed: float = 1.0, bitrate: str = "64k", cover: bytes | None = None,
-                 progress: Callable[[float, str], None] | None = None):
+                 progress: Callable[[float, str], None] | None = None, paragraphs: bool = True):
+        self.paragraphs = paragraphs        # read runs of one-voice sentences of a paragraph in one go
         self.book_id = book_id
         self.book = book
         self.planner = planner
@@ -86,10 +87,34 @@ class ExportJob:
     def cancel(self) -> None:
         self.cancel_event.set()
 
+    def segments(self, units) -> list[dict]:
+        """What to synthesise in one call: consecutive sentences of the same paragraph spoken by one voice,
+        up to what that voice's model reads at once ({"voice", "units", "texts"}); a sentence that mixes
+        narrator and character voices is its own segment ({"voice": None, "units": [u]})."""
+        book, out, cur = self.book, [], None
+        for u in units:
+            runs = self.planner.runs(u)
+            if len(runs) != 1:
+                cur = None
+                out.append({"voice": None, "units": [u], "texts": []})
+                continue
+            voice, text = self.tts.resolve(runs[0][0]), runs[0][1].strip()
+            para = book.units[u][:2]
+            limit = self.tts.engine_for(voice).max_chars
+            if (self.paragraphs and cur is not None and cur["voice"] == voice and cur["para"] == para
+                    and cur["chars"] + 1 + len(text) <= limit):
+                cur["units"].append(u)
+                cur["texts"].append(text)
+                cur["chars"] += 1 + len(text)
+                continue
+            cur = {"voice": voice, "para": para, "units": [u], "texts": [text], "chars": len(text)}
+            out.append(cur)
+        return out
+
     def _work_dir(self) -> Path:
         sig = json.dumps({"n": self.planner.narrator, "c": self.planner.cast if self.planner.use_characters else {},
                           "uc": self.planner.use_characters, "s": self.speed, "p": self.planner.pauses,
-                          "u": self.book.unit_count(), "v": AUDIO_REV}, sort_keys=True)
+                          "u": self.book.unit_count(), "v": AUDIO_REV, "para": self.paragraphs}, sort_keys=True)
         h = hashlib.sha1(sig.encode()).hexdigest()[:10]
         return sub("cache", "export", f"{self.book_id}-{h}")
 
@@ -121,15 +146,19 @@ class ExportJob:
                 lead = silence(CHAPTER_LEAD_IN)         # a breath before each chapter, like a narrator
                 f.write(lead)
                 frames += lead.size
-                for u in units:
+                for group in self.segments(units):
                     if self.cancel_event.is_set():
                         raise Cancelled()
-                    audio = self.tts.synth_runs(self.planner.runs(u), self.speed)
-                    audio = np.concatenate([audio, silence(self.planner.pause(u) / max(self.speed, 0.5))])
+                    if group["voice"]:                  # one voice, one or more sentences of a paragraph
+                        audio = self.tts.synth(group["voice"], " ".join(group["texts"]), self.speed)
+                    else:                               # narrator and characters inside one sentence
+                        audio = self.tts.synth_runs(self.planner.runs(group["units"][0]), self.speed)
+                    last = group["units"][-1]
+                    audio = np.concatenate([audio, silence(self.planner.pause(last) / max(self.speed, 0.5))])
                     f.write(np.clip(audio, -1.0, 1.0))
                     frames += audio.size
-                    done += 1
-                    made_units += 1
+                    done += len(group["units"])
+                    made_units += len(group["units"])
                     elapsed = time.time() - t0
                     eta = elapsed / made_units * (total - done)
                     self.progress(done / total * 0.95, f"Chapter {ci + 1}/{len(book.chapters)} · {_fmt(eta)} left")

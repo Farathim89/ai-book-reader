@@ -1624,7 +1624,8 @@ class MainWindow(QMainWindow):
         if not cover and r.get("cover") and os.path.exists(r["cover"]):
             cover = Path(r["cover"]).read_bytes()
         exp = ExportJob(book_id, book, planner, self.tts, out, speed=float(self.settings["speed"]),
-                        bitrate=self.settings["export_bitrate"], cover=cover, progress=progress)
+                        bitrate=self.settings["export_bitrate"], cover=cover, progress=progress,
+                        paragraphs=bool(self.settings.get("export_paragraphs", True)))
         holder["exp"] = exp
         if cancelled():
             exp.cancel()
