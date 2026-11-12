@@ -1,2 +1,2 @@
 APP_NAME = "Ai Book Reader"
-__version__ = "1.2.7"
+__version__ = "1.2.8"

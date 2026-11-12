@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from ..formats.model import Book
 from ..formats.textproc import has_speech
-from .voices import KOKORO_VOICES
+from .voices import KOKORO_V11_VOICES, KOKORO_VOICES
 
 
 class VoicePlanner:
@@ -79,8 +79,9 @@ class VoicePlanner:
         return round(base * f * jitter, 3)
 
 
-MALE_POOL = [f"kokoro:{v}" for v, _, g, _ in KOKORO_VOICES if g == "male"]
-FEMALE_POOL = [f"kokoro:{v}" for v, _, g, _ in KOKORO_VOICES if g == "female"]
+# Automatic casting uses the voices that are always there (the Kokoro 1.1 ones download on first use: pick by hand)
+MALE_POOL = [f"kokoro:{v}" for v, _, g, _ in KOKORO_VOICES if g == "male" and v not in KOKORO_V11_VOICES]
+FEMALE_POOL = [f"kokoro:{v}" for v, _, g, _ in KOKORO_VOICES if g == "female" and v not in KOKORO_V11_VOICES]
 
 
 def auto_cast(characters: dict[str, dict], narrator: str, existing: dict[str, str] | None = None) -> dict[str, str]:

@@ -6,7 +6,7 @@ import threading
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTableWidget,
+                               QListWidgetItem, QMessageBox, QPushButton, QSizePolicy, QSpinBox, QTableWidget,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QFontComboBox)
 
 from ..tts import voices as V
@@ -398,12 +398,53 @@ class TrainDialog(QDialog):
         return self.file.text(), int(self.minutes.currentData())
 
 
+class FastVoiceDialog(QDialog):
+    """Make a fast Kokoro version of a cloned voice: what it is, how long it takes, which pronunciation."""
+
+    def __init__(self, name: str, again: bool, accent: str = "US", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Fast Kokoro version")
+        self.setMinimumWidth(540)
+        lay = QVBoxLayout(self)
+        intro = muted(f"Makes a Kokoro voice that sounds like “{name}”. It reads at Kokoro speed (about 30 times "
+                      "quicker than the cloned voice), handy for whole audiobooks. It copies the sound of the voice; "
+                      "the way it reads stays Kokoro's.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        form = QFormLayout()
+        self.pron = QComboBox()
+        for key, label in V.ACCENTS.items():
+            self.pron.addItem(label, key)
+        self.pron.setCurrentIndex(max(0, self.pron.findData(accent)))
+        self.pron.setToolTip("How it pronounces words. You can change it later (right-click the fast voice).")
+        form.addRow("Pronunciation", self.pron)
+        lay.addLayout(form)
+        note = muted("It takes about 5-10 minutes on your graphics card (follow it in the Tasks panel); reading "
+                     "aloud waits meanwhile." + (" The fast version it has now is replaced." if again else "")
+                     + " Only for your own listening: don't share voices of real people.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        for label in (intro, note):                    # spare height goes below the text, not into it
+            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        lay.addStretch(1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Make it")
+        bb.button(QDialogButtonBox.Ok).setObjectName("Accent")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def accent(self) -> str:
+        return self.pron.currentData()
+
+
 class VoicesDialog(QDialog):
     _news = Signal(str)
 
-    def __init__(self, tts, player, settings, parent=None, train=None):
+    def __init__(self, tts, player, settings, parent=None, train=None, make_fast=None):
         super().__init__(parent)
         self.train_cb = train                    # main window: start a "Training voice" task
+        self.fast_cb = make_fast                 # main window: start a "Fast voice" task (Kokoro version)
         self.setWindowTitle("Voices")
         self.resize(720, 560)
         self.tts, self.settings = tts, settings
@@ -414,7 +455,8 @@ class VoicesDialog(QDialog):
         lay.addWidget(head)
         sub = muted("Kokoro voices are fast and clear. Cloned voices copy someone from a short recording: "
                     "Best quality sounds closest to them (about 1.8× real time on a good graphics card), "
-                    "Fast is a little quicker (about 2.8×).")
+                    "Fast is a little quicker (about 2.8×). Right-click a cloned voice to make a fast Kokoro "
+                    "version of it.")
         sub.setWordWrap(True)
         lay.addWidget(sub)
         self.list = QListWidget()
@@ -506,7 +548,7 @@ class VoicesDialog(QDialog):
 
     def _sel(self, *_):
         vid = self._cur() or ""
-        self.del_btn.setEnabled(vid.startswith("clone:"))
+        self.del_btn.setEnabled(vid.startswith(("clone:", "fast:")))
         self.edit_btn.setEnabled(vid.startswith("clone:"))
         self.clone_opts.setVisible(vid.startswith("clone:"))
         if vid.startswith("clone:"):
@@ -548,7 +590,21 @@ class VoicesDialog(QDialog):
                 m.addAction("Train on more audio…", self._train)
             if V.clone_adapter(vid) is not None:
                 m.addAction("Forget the training", self._forget_training)
+            if self.fast_cb is not None:
+                m.addAction("Make the fast Kokoro version again…" if V.fast_pack(vid) is not None
+                            else "Make a fast Kokoro version…", self._make_fast)
             m.addAction("Delete", self._delete)
+        elif vid.startswith("fast:"):
+            m.addSeparator()
+            pron = m.addMenu("Pronunciation")
+            now = V.fast_accent(vid)
+            for key, label in V.ACCENTS.items():
+                a = pron.addAction(label, lambda key=key: self._set_accent(key))
+                a.setCheckable(True)
+                a.setChecked(key == now)
+            if self.fast_cb is not None:
+                m.addAction("Make it again…", self._make_fast)
+            m.addAction("Delete the fast version", self._delete)
         m.exec(self.list.viewport().mapToGlobal(pos))
 
     def _train(self) -> None:
@@ -584,22 +640,61 @@ class VoicesDialog(QDialog):
 
     def _delete(self) -> None:
         vid = self._cur()
-        if not vid or not vid.startswith("clone:"):
+        if not vid or not vid.startswith(("clone:", "fast:")):
             return
         v = V.find_voice(vid)
-        default = self.settings["narrator_voice"] == vid
-        msg = (f"Delete the cloned voice “{v.name}”? This can't be undone.\n\n"
-               "Books and characters that use it go back to the default narrator"
-               + (" (it is the default now, so Heart takes over)." if default else "."))
+        slug = vid.split(":", 1)[1]
+        fast = vid.startswith("fast:")
+        default = self.settings["narrator_voice"] in ((vid,) if fast else (vid, f"fast:{slug}"))
+        if fast:
+            msg = (f"Delete “{v.name}”, the fast Kokoro version? The cloned voice itself stays.\n\n"
+                   "Books and characters that use the fast version go back to the default narrator"
+                   + (" (it is the default now, so Heart takes over)." if default else "."))
+        else:
+            msg = (f"Delete the cloned voice “{v.name}”? This can't be undone.\n\n"
+                   + ("Its fast Kokoro version goes too. " if V.fast_pack(vid) is not None else "")
+                   + "Books and characters that use it go back to the default narrator"
+                   + (" (it is the default now, so Heart takes over)." if default else "."))
         if QMessageBox.question(self, "Delete voice", msg) == QMessageBox.Yes:
-            V.remove_clone(vid)
-            self.tts.chatterbox.forget(vid)
-            self.tts.chatterbox_full.forget(vid)
+            pack = V.fast_pack(vid)
+            if pack is not None:
+                self.tts.kokoro.forget_voice(str(pack))
+            if fast:
+                V.remove_fast(vid)
+            else:
+                V.remove_clone(vid)
+                self.tts.chatterbox.forget(vid)
+                self.tts.chatterbox_full.forget(vid)
             if default:
                 self.settings["narrator_voice"] = V.DEFAULT_VOICE
                 self.settings.save()
             self.changed = True
             self._fill()
+
+    def _make_fast(self) -> None:
+        vid = self._cur() or ""
+        clone_id = "clone:" + vid.split(":", 1)[1] if vid.startswith(("clone:", "fast:")) else ""
+        if not clone_id or self.fast_cb is None:
+            return
+        d = FastVoiceDialog(V.find_voice(clone_id).name, V.fast_pack(clone_id) is not None,
+                            V.fast_accent(clone_id), self)
+        if d.exec():
+            self.fast_cb(clone_id, d.accent())
+            self.status.setText("Making the fast version – follow it in the Tasks panel.")
+
+    def _set_accent(self, accent: str) -> None:
+        vid = self._cur() or ""
+        if vid.startswith("fast:"):
+            V.set_fast_accent(vid, accent)
+            self.changed = True
+            self._fill(vid)
+            self.preview.speak(vid, self.sample.text() or PREVIEW_TEXT)
+
+    def voice_made(self, voice_id: str, msg: str) -> None:
+        """A fast version finished while this window is open."""
+        self.changed = True
+        self._fill(voice_id)
+        self.status.setText(msg)
 
 
 # ---------------------------------------------------------------------------------- cast

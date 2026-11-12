@@ -1776,11 +1776,46 @@ class MainWindow(QMainWindow):
 
     # =========================================================================== dialogs
     def show_voices(self) -> None:
-        d = VoicesDialog(self.tts, self.preview_player, self.settings, self, train=self.train_voice)
-        d.exec()
+        d = VoicesDialog(self.tts, self.preview_player, self.settings, self, train=self.train_voice,
+                         make_fast=self.make_fast_voice)
+        self._voices_dialog = d
+        try:
+            d.exec()
+        finally:
+            self._voices_dialog = None
         if d.changed and self.book:
             self.player_bar.set_voices(V.all_voices(), self.narrator.planner.narrator)
             self.narrator.set_planner(self._make_planner())
+
+    def make_fast_voice(self, voice_id: str, accent: str = "US") -> None:
+        """Search a Kokoro voicepack that sounds like a cloned voice (Tasks panel): '<name> (fast)'."""
+        from ..tts import kokoro_search as KS
+        name = V.find_voice(voice_id).name
+        slug = voice_id.split(":", 1)[1]
+        folder = V.clones_dir() / slug
+        source = V.clone_info(voice_id)["source"]
+        tts = self.tts
+
+        def run(progress, cancelled):
+            with tts.gpu:                           # reading aloud waits while it searches
+                rep = KS.make_kokoro_voice(tts.kokoro, source, str(folder / "ref.wav"), folder / "kokoro.pt",
+                                           progress=progress, cancelled=cancelled, accent=accent)
+                tts.kokoro.forget_voice(str(folder / "kokoro.pt"))
+            return (f"{name} (fast) is ready: likeness {rep['likeness'] * 100:.0f}% "
+                    f"(the closest ready-made Kokoro voice, {rep['closest_ready_made']}: "
+                    f"{rep['start_likeness'] * 100:.0f}%)")
+
+        def done(msg: str) -> None:
+            self._status(msg)
+            if self.book:
+                self.player_bar.set_voices(V.all_voices(), self.narrator.planner.narrator)
+            d = getattr(self, "_voices_dialog", None)
+            if d is not None:
+                d.voice_made(f"fast:{slug}", msg)
+        job = Job(f"Fast voice: {name}"[:70], run, heavy=True)
+        self.jobs.run(job, on_done=done, on_failed=lambda e: QMessageBox.warning(self, "Fast voice", e))
+        if not self.jobs_panel.isVisible():
+            self._toggle_jobs()
 
     def train_voice(self, voice_id: str, source: str, minutes: int) -> None:
         """Teach a cloned voice the person's delivery from a longer recording (Tasks panel)."""

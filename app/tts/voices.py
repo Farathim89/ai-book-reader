@@ -28,14 +28,17 @@ KOKORO_VOICES = [
     ("bm_lewis", "Lewis", "male", "UK"), ("am_echo", "Echo", "male", "US"),
     ("am_eric", "Eric", "male", "US"), ("am_liam", "Liam", "male", "US"),
     ("bm_daniel", "Daniel", "male", "UK"), ("am_onyx", "Onyx", "male", "US"),
+    ("af_maple", "Maple", "female", "US"), ("af_sol", "Sol", "female", "US"), ("bf_vale", "Vale", "female", "UK"),
 ]
+# English voices that only exist for the Kokoro 1.1 model (downloaded the first time one is used)
+KOKORO_V11_VOICES = {"af_maple", "af_sol", "bf_vale"}
 DEFAULT_VOICE = "kokoro:af_heart"
 CHATTERBOX_DEFAULT = "chatterbox:default"
 
 
 @dataclass(frozen=True)
 class Voice:
-    id: str          # "kokoro:af_heart", "chatterbox:default", "clone:<slug>"
+    id: str          # "kokoro:af_heart", "chatterbox:default", "clone:<slug>", "fast:<slug>" (Kokoro copy of a clone)
     name: str
     gender: str      # "female" / "male" / "neutral"
     engine: str      # "kokoro" / "chatterbox"
@@ -47,7 +50,8 @@ class Voice:
 
 
 def kokoro_voices() -> list[Voice]:
-    return [Voice(f"kokoro:{vid}", name, g, "kokoro", f"{acc} {g}") for vid, name, g, acc in KOKORO_VOICES]
+    return [Voice(f"kokoro:{vid}", name, g, "kokoro", f"{acc} {g}" + (", Kokoro 1.1" if vid in KOKORO_V11_VOICES else ""))
+            for vid, name, g, acc in KOKORO_VOICES]
 
 
 # ---- cloned voices ---------------------------------------------------------
@@ -302,9 +306,78 @@ def remove_clone(voice_id: str) -> None:
         shutil.rmtree(clones_dir() / voice_id.split(":", 1)[1], ignore_errors=True)
 
 
+# ---- fast (Kokoro) versions of cloned voices: kokoro_search.py makes kokoro.pt in the clone's folder ----
+def fast_pack(voice_id: str) -> Path | None:
+    """The Kokoro voicepack of a cloned voice ("clone:x" or "fast:x"), or None when it has none."""
+    if not voice_id.startswith(("clone:", "fast:")):
+        return None
+    p = clones_dir() / voice_id.split(":", 1)[1] / "kokoro.pt"
+    return p if p.exists() else None
+
+
+def fast_info(voice_id: str) -> dict | None:
+    """What the search reported (likeness before / after, minutes, date), or None without a fast version."""
+    p = fast_pack(voice_id)
+    if p is None:
+        return None
+    try:
+        return json.loads(p.with_name("kokoro.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def remove_fast(voice_id: str) -> None:
+    d = clones_dir() / voice_id.split(":", 1)[-1]
+    for name in ("kokoro.pt", "kokoro.json"):
+        (d / name).unlink(missing_ok=True)
+
+
+ACCENTS = {"US": "American English", "UK": "British English"}
+
+
+def fast_accent(voice_id: str) -> str:
+    """How a fast version pronounces words: "US" (default) or "UK"."""
+    info = fast_info(voice_id) or {}
+    return info.get("accent") if info.get("accent") in ACCENTS else "US"
+
+
+def set_fast_accent(voice_id: str, accent: str) -> None:
+    p = fast_pack(voice_id)
+    if p is None or accent not in ACCENTS:
+        return
+    info = fast_info(voice_id) or {}
+    info["accent"] = accent
+    p.with_name("kokoro.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
+
+
+def fast_voices() -> list[Voice]:
+    out = []
+    for v in clone_voices():
+        slug = v.id.split(":", 1)[1]
+        if fast_pack(v.id) is not None:
+            out.append(Voice(f"fast:{slug}", f"{v.name} (fast)", v.gender, "kokoro",
+                             f"{fast_accent(v.id)}, Kokoro copy of a cloned voice"))
+    return out
+
+
+def kokoro_arg(voice_id: str) -> str:
+    """What the Kokoro engine is given: a voice name ("af_heart") or the path of a voicepack file."""
+    if voice_id.startswith("fast:"):
+        p = fast_pack(voice_id)
+        return str(p) if p is not None else "af_heart"
+    return voice_id.split(":", 1)[1]
+
+
+def kokoro_lang(voice_id: str) -> str:
+    """Kokoro's pronunciation for a voice: "b" (British) or "a" (American)."""
+    if voice_id.startswith("fast:"):
+        return "b" if fast_accent(voice_id) == "UK" else "a"
+    return "b" if voice_id.split(":", 1)[-1].startswith(("bf_", "bm_")) else "a"
+
+
 def all_voices() -> list[Voice]:
     return kokoro_voices() + [Voice(CHATTERBOX_DEFAULT, "Chatterbox", "female", "chatterbox",
-                                    "expressive, built-in")] + clone_voices()
+                                    "expressive, built-in")] + clone_voices() + fast_voices()
 
 
 def find_voice(voice_id: str | None) -> Voice:

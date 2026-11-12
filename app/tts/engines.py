@@ -36,15 +36,71 @@ def offline_first(fn):
         constants.HF_HUB_OFFLINE = False
 
 
+KOKORO_REPO = "hexgrad/Kokoro-82M"
+KOKORO_V11_REPO = "hexgrad/Kokoro-82M-v1.1-zh"      # its English voices: Maple, Sol, Vale
+
+
+def _byte_bar(bars: list, tick):
+    """A tqdm class for hf_hub_download(tqdm_class=...): counts bytes quietly and calls tick() on each update.
+    Works for both download paths (the fast parallel Xet one and plain HTTP)."""
+    import io
+
+    from tqdm import tqdm
+
+    class Bar(tqdm):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("name", None)
+            kwargs["disable"] = False
+            kwargs.setdefault("file", io.StringIO())        # no console in the app
+            super().__init__(*args, **kwargs)
+            bars.append(self)
+
+        def update(self, n=1):
+            out = super().update(n)
+            tick()
+            return out
+    return Bar
+
+
+def download_with_progress(repo: str, files: list[str], label: str, notify) -> None:
+    """Fetch files of a Hugging Face model repo that are not cached yet, telling notify(text) how far it is.
+    Uses the fast (parallel Xet) download when available - about 50x quicker here than plain HTTP."""
+    from huggingface_hub import HfApi, hf_hub_download, try_to_load_from_cache
+    missing = [f for f in files if not isinstance(try_to_load_from_cache(repo, f), str)]
+    if not missing:
+        return
+    sizes = {s.rfilename: s.size or 0 for s in HfApi().model_info(repo, files_metadata=True).siblings
+             if s.rfilename in missing}
+    total = sum(sizes.values()) or 1
+    size = f"{total / 1e9:.1f} GB" if total >= 1e9 else f"{total / 1e6:.0f} MB"
+    state = {"done": 0, "shown": 0}
+    notify(f"{label}: 0% of {size}")
+    for f in missing:
+        bars: list = []
+
+        def tick(f=f, bars=bars):
+            part = min(max((b.n for b in bars), default=0), sizes.get(f, 0))     # Xet keeps two bars: same bytes
+            pct = min(99, int(100 * (state["done"] + part) / total))
+            if pct > state["shown"]:
+                state["shown"] = pct
+                notify(f"{label}: {pct}% of {size}")
+        hf_hub_download(repo, f, tqdm_class=_byte_bar(bars, tick))
+        state["done"] += sizes.get(f, 0)
+
+
 class KokoroEngine:
-    """hexgrad/Kokoro-82M - fast, high quality, fixed voice list."""
+    """hexgrad/Kokoro-82M - fast, high quality. Voices: its ready-made ones, three more from the Kokoro 1.1
+    model (loaded the first time one is used), and voicepack files (.pt) made by kokoro_search.py."""
     name = "kokoro"
     max_chars = 350
 
     def __init__(self):
         self.model = None
+        self.model11 = None
         self.pipes: dict[str, object] = {}
+        self.pipes11: dict[str, object] = {}
         self._load_lock = threading.Lock()
+        self.notify = lambda text: None
 
     @property
     def loaded(self) -> bool:
@@ -57,19 +113,44 @@ class KokoroEngine:
             warnings.filterwarnings("ignore", category=UserWarning)
             warnings.filterwarnings("ignore", category=FutureWarning)
             from kokoro import KModel
-            self.model = offline_first(lambda: KModel(repo_id="hexgrad/Kokoro-82M").to(_device()).eval())
+            self.model = offline_first(lambda: KModel(repo_id=KOKORO_REPO).to(_device()).eval())
             self._pipe("a")
             self.synth("Ready.", "af_heart", 1.0)   # warm-up
 
     def _pipe(self, lang: str):
         if lang not in self.pipes:
             from kokoro import KPipeline
-            self.pipes[lang] = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M", model=self.model)
+            self.pipes[lang] = KPipeline(lang_code=lang, repo_id=KOKORO_REPO, model=self.model)
         return self.pipes[lang]
 
-    def synth(self, text: str, voice: str, speed: float) -> np.ndarray:
+    def _pipe11(self, lang: str):
+        """Pipeline on the Kokoro 1.1 model (downloads ~330 MB the first time)."""
+        with self._load_lock:
+            if self.model11 is None:
+                from kokoro import KModel
+                download_with_progress(KOKORO_V11_REPO, ["config.json", "kokoro-v1_1-zh.pth"],
+                                       "Downloading the Kokoro 1.1 voices (once)", self.notify)
+                self.notify("Loading the Kokoro 1.1 voices…")
+                self.model11 = offline_first(lambda: KModel(repo_id=KOKORO_V11_REPO).to(_device()).eval())
+                self.notify("")
+        if lang not in self.pipes11:
+            from kokoro import KPipeline
+            self.pipes11[lang] = KPipeline(lang_code=lang, repo_id=KOKORO_V11_REPO, model=self.model11)
+        return self.pipes11[lang]
+
+    def forget_voice(self, voice: str) -> None:
+        """Drop a cached voicepack (a .pt file that was made again or removed)."""
+        for pipe in list(self.pipes.values()) + list(self.pipes11.values()):
+            pipe.voices.pop(voice, None)
+
+    def synth(self, text: str, voice: str, speed: float, lang: str | None = None) -> np.ndarray:
+        """voice: a Kokoro voice name or a voicepack file; lang: "a" American / "b" British pronunciation
+        (by default from the voice name; voicepack files: American)."""
         import torch
-        pipe = self._pipe("b" if voice.startswith("b") else "a")
+
+        from .voices import KOKORO_V11_VOICES
+        lang = lang or ("b" if voice.startswith(("bf_", "bm_")) else "a")
+        pipe = self._pipe11(lang) if voice in KOKORO_V11_VOICES else self._pipe(lang)
         if voice not in pipe.voices:
             offline_first(lambda: pipe.load_voice(voice))
         parts = []
@@ -194,44 +275,7 @@ class ChatterboxFullEngine:
         return all(isinstance(try_to_load_from_cache(FULL_REPO, f), str) for f in FULL_FILES)
 
     def _download(self) -> None:
-        from pathlib import Path
-
-        from huggingface_hub import HfApi, constants, hf_hub_download, try_to_load_from_cache
-        sizes = {s.rfilename: s.size or 0 for s in HfApi().model_info(FULL_REPO, files_metadata=True).siblings
-                 if s.rfilename in FULL_FILES}
-        total = sum(sizes.values()) or 1
-        blobs = Path(constants.HF_HUB_CACHE) / "models--ResembleAI--chatterbox" / "blobs"
-        done = 0
-        shown = 0                                     # never let the percentage go backwards
-        old = constants.HF_HUB_DISABLE_XET
-        constants.HF_HUB_DISABLE_XET = True          # plain download: its .incomplete file shows the progress
-        try:
-            for f in FULL_FILES:
-                if not isinstance(try_to_load_from_cache(FULL_REPO, f), str):
-                    errors: list[Exception] = []
-
-                    def get(f=f):
-                        try:
-                            hf_hub_download(FULL_REPO, f)
-                        except Exception as e:  # noqa: BLE001
-                            errors.append(e)
-                    t = threading.Thread(target=get, daemon=True)
-                    t.start()
-                    while t.is_alive():
-                        try:
-                            part = sum(p.stat().st_size for p in blobs.glob("*.incomplete")) if blobs.exists() else 0
-                        except OSError:                       # a part file finished while we looked
-                            part = 0
-                        part = min(part, sizes.get(f, 0))     # one file at a time: never count it twice
-                        shown = max(shown, min(99, int(100 * (done + part) / total)))
-                        self.notify(f"Downloading the high-quality voice model (once): {shown}% of "
-                                    f"{total / 1e9:.1f} GB")
-                        t.join(0.5)
-                    if errors:
-                        raise errors[0]
-                done += sizes.get(f, 0)
-        finally:
-            constants.HF_HUB_DISABLE_XET = old
+        download_with_progress(FULL_REPO, FULL_FILES, "Downloading the high-quality voice model (once)", self.notify)
 
     def load(self) -> None:
         with self._load_lock:

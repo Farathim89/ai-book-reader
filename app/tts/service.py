@@ -14,8 +14,8 @@ import numpy as np
 
 from ..formats.textproc import has_speech, speech_text, split_for_tts
 from .engines import SR, ChatterboxEngine, ChatterboxFullEngine, KokoroEngine
-from .voices import (CHATTERBOX_DEFAULT, DEFAULT_VOICE, clone_adapter, clone_ref_path, clone_settings, ffmpeg_exe,
-                     find_voice)
+from .voices import (CHATTERBOX_DEFAULT, DEFAULT_VOICE, clone_adapter, clone_ref_path, clone_settings, fast_pack,
+                     fast_accent, ffmpeg_exe, find_voice, kokoro_arg, kokoro_lang)
 
 NATURAL_PACE = 0.9          # 1.0x = an audiobook narrator's pace (the raw voices speak ~10% faster)
 TARGET_LUFS = -19.0         # audiobook loudness (ACX / Audible range), the same for every voice
@@ -96,6 +96,7 @@ class TTSService:
         self.chatterbox = ChatterboxEngine()
         self.chatterbox_full = ChatterboxFullEngine()
         self.chatterbox_full.notify = self._notify
+        self.kokoro.notify = self._notify               # Kokoro 1.1 download (once)
         self.gpu = threading.RLock()
         self._gains: dict[str, float] | None = None
         self.listeners: list = []           # callables(text): download / loading news for the windows
@@ -116,6 +117,9 @@ class TTSService:
             ad = clone_adapter(voice_id)                # measured again
             trained = f"|t{int(ad.stat().st_mtime)}" if ad is not None and cs["model"] == "full" else ""
             return f"{voice_id}@{st.st_size}-{int(st.st_mtime)}|{cs['model']}|{cs['expressiveness']}{trained}"
+        pack = fast_pack(voice_id) if voice_id.startswith("fast:") else None
+        if pack is not None:                            # made again / other pronunciation: measured again
+            return f"{voice_id}@{int(pack.stat().st_mtime)}|{fast_accent(voice_id)}"
         return voice_id
 
     def _gain_file(self):
@@ -165,6 +169,8 @@ class TTSService:
             return DEFAULT_VOICE
         if voice_id.startswith("clone:") and clone_ref_path(voice_id) is None:
             return DEFAULT_VOICE
+        if voice_id.startswith("fast:"):
+            return voice_id if fast_pack(voice_id) is not None else DEFAULT_VOICE
         if voice_id.startswith("kokoro:") or voice_id == CHATTERBOX_DEFAULT or voice_id.startswith("clone:"):
             return voice_id if find_voice(voice_id).id == voice_id else DEFAULT_VOICE
         return DEFAULT_VOICE
@@ -200,7 +206,7 @@ class TTSService:
                     else:
                         a = eng.synth(chunk, voice_id, str(ref) if ref else None, ex)
                 else:
-                    a = eng.synth(chunk, voice_id.split(":", 1)[1], speed)
+                    a = eng.synth(chunk, kokoro_arg(voice_id), speed, lang=kokoro_lang(voice_id))
                 a = trim_silence(a)
                 if a.size:
                     if out:
