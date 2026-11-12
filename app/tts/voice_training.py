@@ -120,19 +120,11 @@ def pick_spans(total: float, minutes: float, parts: int = 3) -> list[tuple[float
 
 
 def transcribe(audio16k: np.ndarray, offset: float, asr, progress=None) -> list[tuple[float, float, str]]:
-    """Words with times (seconds from the start of the recording). Retries with less memory when the
-    graphics card is short of it (other apps, the voice models)."""
-    import torch
-    out = None
-    for batch in (8, 4, 1):
-        try:
-            out = asr({"raw": audio16k, "sampling_rate": SR16}, return_timestamps="word", chunk_length_s=30,
-                      batch_size=batch, generate_kwargs={"language": "en", "task": "transcribe"})
-            break
-        except (torch.OutOfMemoryError, RuntimeError) as e:
-            if "out of memory" not in str(e).lower() or batch == 1:
-                raise
-            torch.cuda.empty_cache()
+    """Words with times (seconds from the start of the recording).
+    One 30-second piece at a time: word timing keeps Whisper's attention maps (~2.9 GB per piece), so batch 4 already
+    needs ~15 GB, and on Windows an overfull card does not fail - it spills into system memory and crawls."""
+    out = asr({"raw": audio16k, "sampling_rate": SR16}, return_timestamps="word", chunk_length_s=30,
+              batch_size=1, generate_kwargs={"language": "en", "task": "transcribe"})
     words = []
     for c in out.get("chunks", []):
         s, e = c.get("timestamp", (None, None))
